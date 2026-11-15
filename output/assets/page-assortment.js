@@ -111,23 +111,34 @@
 
   /* ---------- chart B ---------- */
   var qb = Q.assort_client;
+  // With the market shown, both series are drawn as a share of their own total, so the
+  // gap between a filled bubble (our channel) and its circle (market) is directly readable.
+  var TOT = { rev: 0, units: 0, mkt_rev: 0, mkt_units: 0 };
+  D.cells.forEach(function (c) { TOT.rev += c.rev || 0; TOT.units += c.units || 0; TOT.mkt_rev += c.mkt_rev || 0; TOT.mkt_units += c.mkt_units || 0; });
+  function fmtShare(v) { return (v * 100 >= 1 ? (v * 100).toFixed(0) : (v * 100).toPrecision(1)) + '%'; }
+  function xOwn(o) { var r = metric === 'rev', v = r ? o.rev : o.units; return showMkt ? v / (r ? TOT.rev : TOT.units) : v; }
+  function xMkt(o) { var r = metric === 'rev'; return (r ? o.mkt_rev : o.mkt_units) / (r ? TOT.mkt_rev : TOT.mkt_units); }
   function axisB() {
     var r = metric === 'rev';
+    if (showMkt) return {
+      label: 'Share of total ' + (r ? 'revenue' : 'units') + ', 12 weeks (log) · filled = our channel, circle = market',
+      scale: 'log', format: fmtShare, split: (r ? qb.x_split_rev : qb.x_split_units) / (r ? TOT.rev : TOT.units)
+    };
     return {
-      label: (r ? 'Channel revenue, 12 weeks (log)' : 'Channel units, 12 weeks (log)') + (showMkt ? ' · circle = market ' + (r ? 'revenue' : 'units') : ''),
+      label: r ? 'Channel revenue, 12 weeks (log)' : 'Channel units, 12 weeks (log)',
       scale: 'log', format: r ? F.eurK : F.int, split: r ? qb.x_split_rev : qb.x_split_units
     };
   }
   function legendB(extra) {
     var l = extra.slice();
-    if (showMkt) l.push({ label: 'Market (same cell / SKU)', color: '#8a8982', hollow: true });
+    if (showMkt) l.push({ label: 'Market share of total (circle right of bubble = we under-index)', color: '#8a8982', hollow: true });
     return l;
   }
   function rootB() {
     var r = metric === 'rev';
     var pts = D.cells.filter(function (c) { return c.n_skus > 0 && nn(c.ch_trend); }).map(function (c) {
       var p = {
-        id: c.key, x: r ? c.rev : c.units, y: c.ch_trend, size: c.n_skus, data: c,
+        id: c.key, x: xOwn(c), y: c.ch_trend, size: c.n_skus, data: c,
         color: c.gap ? RED : c.under ? AMBER : C.client,
         tip: { title: lbl(c.key), rows: [
           ['SKUs', F.int(c.n_skus) + ' (' + F.int(c.n_active) + ' active, ' + F.int(c.n_inactive) + ' inactive, ' + F.int(c.n_oos) + ' out of stock)'],
@@ -138,7 +149,7 @@
         ].concat(c.under ? [['Under-performing', c.under_reason]] : []).concat(c.gap ? [['Gap', c.gap_reason]] : [])
           .concat(c.rev <= 0 ? [['Note', 'No channel sales: drawn in the 0 lane']] : []) }
       };
-      if (showMkt && nn(c.mk_trend)) p.link = { x: r ? c.mkt_rev : c.mkt_units, y: c.mk_trend };
+      if (showMkt && nn(c.mk_trend)) p.link = { x: xMkt(c), y: c.mk_trend };
       return p;
     });
     return { id: 'cells', title: 'All cells', points: pts, x: axisB(),
@@ -149,7 +160,7 @@
     var r = metric === 'rev';
     var pts = (skusBy[key] || []).filter(function (s) { return nn(s.ch_trend); }).map(function (s) {
       var p = {
-        id: s.id, x: r ? s.rev : s.units, y: s.ch_trend, label: s.id, data: s,
+        id: s.id, x: xOwn(s), y: s.ch_trend, label: s.id, data: s,
         color: s.active ? (C[s.stock] || C.client) : C.inactive, hollow: !s.active, dashed: !s.active,
         tip: { title: s.id + ' · ' + s.name, rows: [
           ['Brand', s.brand], ['Status', s.active ? 'Active' : 'Inactive'],
@@ -159,7 +170,7 @@
           ['Supplier', s.supplier]
         ].concat(s.rev <= 0 ? [['Note', 'No channel sales: drawn in the 0 lane']] : []) }
       };
-      if (showMkt && nn(s.mk_trend)) p.link = { x: r ? s.mkt_rev : s.mkt_units, y: s.mk_trend };
+      if (showMkt && nn(s.mk_trend)) p.link = { x: xMkt(s), y: s.mk_trend };
       return p;
     });
     return { id: 'cell:' + key, cellKey: key, title: lbl(key), points: pts, x: axisB(),

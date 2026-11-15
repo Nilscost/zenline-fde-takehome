@@ -33,7 +33,7 @@
   if (rec) app.appendChild(callout(rec));
 
   var skuById = {}; D.skus.forEach(function (s) { skuById[s.id] = s; });
-  var STORY = { above: "Priced above", below: "Priced below", mixed: "Mixed" };
+  var STORY = { above: "Price looks high", below: "Price looks low", mixed: "Signals disagree" };
   var TIER_COL = { Confirmed: "#8e2a6b", Flag: COL.low_stock };
   var NEUTRAL = "#b8c4cc";
 
@@ -184,7 +184,7 @@
     columns: [
       { key: "tier", label: "Tier", html: true, sortValue: function (r) { return r.tier === "Confirmed" ? 0 : 1; }, fmt: function (v) { return U.badge(v, v === "Confirmed" ? "confirmed" : "flag"); } },
       { key: "id", label: "ID" }, { key: "name", label: "Product" },
-      { key: "story", label: "Story", fmt: function (v) { return STORY[v] || v; } },
+      { key: "story", label: "Signals say", fmt: function (v) { return STORY[v] || v; } },
       { key: "signals", label: "Signals fired", html: true, sortable: false, fmt: function (v, r) { return sigHtml(r); } },
       { key: "price", label: "Price", num: true, fmt: function (v) { return F.money(v); } },
       { key: "mkt_asp", label: "Market avg price", num: true, fmt: function (v) { return F.money(v); } },

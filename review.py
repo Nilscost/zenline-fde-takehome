@@ -449,7 +449,7 @@ def build_recs(skus, cells, suppliers, L, S):
     recs.append({
         "q": 4, "action": f"Restock {plural(len(oos), 'out-of-stock SKU')} and {plural(len(lows), 'low-stock SKU')} in rising markets; start with {sup['name']}",
         "evidence": f"{plural(len(oos), 'active SKU')} out of stock carry {eur(oos_rev)} of 12-week revenue, and {sup['name']} alone accounts for {share(sup['rev_exposed'] / exposed, 0)} of exposed revenue",
-        "prize_low": lo_r * oos_rev, "prize_high": hi_r * oos_rev + T["prize_high_lowstock"] * low_rev, "prize_unit": "revenue",
+        "prize_low": lo_r * oos_rev, "prize_high": hi_r * oos_rev + T["prize_high_lowstock"] * low_rev, "prize_unit": "revenue protected",
         "basis": f"Low: {lo_r:.0%} of the 12-week revenue of {plural(len(oos), 'active out-of-stock SKU')}. High: {hi_r:.0%} of it plus "
                  f"{T['prize_high_lowstock']:.0%} of the 12-week revenue of {plural(len(lows), 'low-stock SKU')} in markets growing {pct(T['rising_market'])} or more."})
     for r in recs:
