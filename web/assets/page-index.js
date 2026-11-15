@@ -6,7 +6,7 @@
   var F = UI.fmt, el = UI.el;
 
   // Card order comes from the data layer: "prize" = largest high-end prize first, "question" = Q1..Q4.
-  const SORT = D.rec_sort;
+  const SORT = 'question';
 
   var st = document.createElement('style');
   st.textContent =
@@ -25,18 +25,22 @@
 
   var m = D.meta;
   app.appendChild(el('div', { class: 'page-head' },
-    el('h1', { text: 'Hair Coloration: category opportunity review' }),
-    el('p', { class: 'sub', text: m.client + ' · last ' + m.period_weeks + ' weeks · ' + F.int(m.n_skus) + ' SKUs · ' +
-      F.int(m.n_comps) + ' competitor products (snapshot of ' + m.observed_date + ')' })));
-
-  UI.kpis(app, D.kpis);
+    el('h1', { text: 'Hair Coloration: category opportunity review' })));
 
   var recs = D.recs.slice();
   if (SORT === 'prize') recs.sort(function (a, b) { return b.prize_high - a.prize_high; });
   else recs.sort(function (a, b) { return a.q - b.q; });
 
+  var total = D.opportunity_total;
+  var relists = D.lists.gaps.filter(function (g) { return g.type === 'sku'; }).length;
+  var intro = 'After analysing Hair Coloration sales, market demand and competitor signals, we recommend relisting ' + relists +
+    ' high-demand SKUs and filling missing assortment, supporting under-sold products and reviewing low performers, reviewing price outliers, and prioritising replenishment';
+  if (total) intro += ' — an illustrative ' + F.prize(total.low) + '–' + F.prize(total.high) + ' in additional or protected revenue over 12 weeks.';
+  else intro += '.';
+  app.appendChild(el('p', { class: 'idx-intro', text: intro }));
+
   var sec = el('section', null, el('h2', { text: 'Recommendations' }),
-    el('p', { class: 'idx-order', text: SORT === 'prize' ? 'Sorted by size of prize (high end), largest first. Click a card for the evidence.' : 'Sorted by question number. Click a card for the evidence.' }));
+    el('p', { class: 'idx-order', text: 'Right assortment → right products → right price → right availability. Select a recommendation for the evidence.' }));
   recs.forEach(function (r) {
     sec.appendChild(el('a', { class: 'idx-card', href: r.page },
       el('div', null,
@@ -44,11 +48,12 @@
         el('h3', { text: r.action }),
         el('p', { class: 'idx-ev', text: r.evidence })),
       el('div', { class: 'idx-prize' },
-        el('b', { text: F.eurK(r.prize_low) + ' – ' + F.eurK(r.prize_high) }),
+        el('b', { text: F.prize(r.prize_low) + ' – ' + F.prize(r.prize_high) }),
         el('span', { text: 'per ' + m.period_weeks + ' weeks · ' + r.prize_unit }),
         el('i', { text: 'illustrative' }))));
   });
   app.appendChild(sec);
 
-  app.appendChild(el('p', { class: 'note', html: 'Prizes are illustrative scenarios, not forecasts, and they overlap, so they should not be added together. The basis for each range is on the <a href="method.html">Method page</a>.' }));
+  app.appendChild(el('p', { class: 'note', text: total ? total.basis : 'Opportunity ranges are illustrative scenarios, not forecasts.' }));
+  app.appendChild(el('p', { class: 'note', html: 'The assumptions and source calculations are on the <a href="method.html">Method page</a>.' }));
 })();

@@ -13,6 +13,11 @@
   function group(n) { return String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ","); }
 
   var fmt = {
+    prize: function (v) {
+      if (!isNum(v)) return "–";
+      if (v > 0 && v < 500) return "<€1k";
+      return (v < 0 ? MINUS : "") + "€" + group(Math.abs(v) / 1000) + "k";
+    },
     eur: function (v) {
       if (!isNum(v)) return "–";
       var r = Math.round(v);
@@ -263,7 +268,7 @@
     left.appendChild(el("h3", { text: rec.action }));
     left.appendChild(el("p", { class: "rc-ev", text: rec.evidence }));
     var right = el("div", { class: "rc-prize" },
-      el("b", { text: fmt.eurK(rec.prize_low) + " – " + fmt.eurK(rec.prize_high) }),
+      el("b", { text: fmt.prize(rec.prize_low) + " – " + fmt.prize(rec.prize_high) }),
       el("span", { text: rec.prize_unit + " / 12 wks" }));
     c.appendChild(left);
     c.appendChild(right);

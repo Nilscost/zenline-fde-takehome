@@ -156,6 +156,7 @@
     var toolbar = H("div", "qc-toolbar"), legendEl = H("div", "qc-legend"), plotEl = H("div", "qc-plot");
     plotEl.style.position = "relative";
     root.appendChild(toolbar); root.appendChild(legendEl); root.appendChild(plotEl);
+    root.appendChild(H("p", "note qc-source", opts.source || "Source: sku_performance.csv; product_metadata.csv · 12-week performance. Market values are supplied demand proxies."));
     container.innerHTML = "";
     container.appendChild(root);
 
@@ -226,6 +227,7 @@
         xv.push(p.x); yv.push(p.y);
         if (p.link) { xv.push(p.link.x); yv.push(p.link.y); }
       });
+      (e.x.references || []).forEach(function (r) { xv.push(r.value); });
       var xs = buildScale(e.x, xv, pw, Math.max(3, Math.floor(pw / 95)));
       var ys = buildScale(e.y, yv, ph, Math.max(3, Math.floor(ph / 50)));
       function X(v) { return xs.t(v); }
@@ -290,6 +292,14 @@
       // split lines
       if (sx != null) S("line", { x1: sx, x2: sx, y1: 0, y2: ph, stroke: "#8a8982", "stroke-dasharray": "5 4", "pointer-events": "none" }, plot);
       if (sy != null) S("line", { x1: 0, x2: pw, y1: sy, y2: sy, stroke: "#8a8982", "stroke-dasharray": "5 4", "pointer-events": "none" }, plot);
+      (e.x.references || []).forEach(function (r) {
+        var rx = X(r.value);
+        S("line", { x1: rx, x2: rx, y1: 0, y2: ph, stroke: "#8a8982", "stroke-dasharray": "3 4", "pointer-events": "none" }, plot);
+        if (r.label) {
+          var rt = S("text", { x: rx + (r.value < 1 ? -5 : 5), y: 30, "text-anchor": r.value < 1 ? "end" : "start", "font-size": 11, fill: "#6b6a65" }, plot);
+          rt.textContent = r.label;
+        }
+      });
       bg.addEventListener("click", function () { if (opts.onBackgroundClick) opts.onBackgroundClick(qc); });
       var bgHit = S("rect", { x: 0, y: 0, width: pw, height: ph, fill: "transparent" }, plot);
       bgHit.addEventListener("click", function () { if (opts.onBackgroundClick) opts.onBackgroundClick(qc); });

@@ -9,7 +9,7 @@
   var st = document.createElement('style');
   st.textContent =
     '.asm-callout{display:flex;justify-content:space-between;gap:24px;align-items:center;flex-wrap:wrap}' +
-    '.asm-callout h3{font-size:19px;margin:8px 0 4px}.asm-callout p{margin:0}' +
+    '.page-head h1{font-size:18px;color:var(--muted);font-weight:400}.asm-callout h3{font-size:27px;margin:8px 0 4px}.asm-callout p{margin:0}' +
     '.asm-prize{text-align:right;flex:none}.asm-prize b{display:block;font-size:26px;color:var(--accent);font-variant-numeric:tabular-nums;white-space:nowrap}' +
     '.asm-prize span{display:block;font-size:12px;color:var(--muted)}.asm-prize i{font-size:11px;color:var(--warn);font-style:normal}' +
     '.asm-basis{margin-top:10px!important;font-size:13px;color:var(--muted)}' +
@@ -35,7 +35,7 @@
     var co = UI.card();
     co.appendChild(el('div', { class: 'asm-callout' },
       el('div', null, el('div', { html: UI.badge('Q1', 'q') }), el('h3', { text: rec.action }), el('p', { class: 'note', text: rec.evidence })),
-      el('div', { class: 'asm-prize' }, el('b', { text: F.eurK(rec.prize_low) + ' – ' + F.eurK(rec.prize_high) }),
+      el('div', { class: 'asm-prize' }, el('b', { text: F.prize(rec.prize_low) + ' – ' + F.prize(rec.prize_high) }),
         el('span', { text: 'per ' + M.period_weeks + ' weeks · ' + rec.prize_unit }), el('i', { text: 'illustrative' }))));
     co.appendChild(el('p', { class: 'asm-basis', text: rec.basis }));
     app.appendChild(co);
@@ -53,10 +53,8 @@
 
   var cardB = UI.card('Your performance', 'How your own cells sell and trend. Click a bubble to see its SKUs.');
   var tools = el('div', { class: 'toolrow' });
-  var metric = 'rev', showMkt = false;
+  var metric = 'rev';
   var tg = UI.toggle(tools, [{ value: 'rev', label: 'Revenue' }, { value: 'units', label: 'Units' }], 'rev', function (v) { metric = v; renderB(); });
-  tools.appendChild(el('span', { class: 'note', text: 'Show market:' }));
-  UI.toggle(tools, [{ value: 'off', label: 'Off' }, { value: 'on', label: 'On' }], 'off', function (v) { showMkt = v === 'on'; renderB(); });
   var hostB = el('div'); var noteB = el('div', { class: 'asm-cross' });
   cardB.appendChild(tools); cardB.appendChild(hostB); cardB.appendChild(noteB);
   chartsRow.appendChild(cardA); chartsRow.appendChild(cardB);
@@ -73,8 +71,8 @@
   function rootA() {
     var pts = D.cells.filter(function (c) { return c.n_comp > 0 && nn(c.comp_score_mean) && nn(c.comp_trend_mean); }).map(function (c) {
       return {
-        id: c.key, x: c.comp_score_mean, y: c.comp_trend_mean, size: c.n_comp, color: c.gap ? RED : C.comp,
-        label: c.gap ? c.shade + ' · ' + abbr[c.sub] : null, data: c,
+        id: c.key, x: c.comp_score_mean, y: c.comp_trend_mean, size: c.n_comp, color: c.n_skus === 0 ? RED : '#a6aaa8',
+        label: c.n_skus === 0 ? c.shade + ' · ' + abbr[c.sub] : null, data: c,
         tip: { title: lbl(c.key), rows: [
           ['Competitor products', F.int(c.n_comp) + ' (' + F.int(c.n_hot) + ' hot)'],
           ['Mean signal score', F.idx(c.comp_score_mean, 1)], ['Mean trend', F.pct(c.comp_trend_mean)],
@@ -85,14 +83,14 @@
       };
     });
     return { id: 'cells', title: 'All cells', points: pts,
-      legend: [{ label: 'Assortment gap cell', color: RED }, { label: 'Other cell', color: C.comp }],
+      legend: [{ label: 'Zero client SKUs', color: RED }, { label: 'Other cell', color: '#a6aaa8' }],
       sizeNote: 'Bubble size = number of competitor products' };
   }
   function compView(key) {
     var pts = (compsBy[key] || []).map(function (p) {
       var ms = p.match_sku ? UI.sku(p.match_sku) : null;
       return {
-        id: p.id, x: p.score, y: p.trend, color: p.hot ? RED : C.comp, label: p.id, data: p,
+        id: p.id, x: p.score, y: p.trend, color: '#a6aaa8', label: p.id, data: p,
         tip: { title: p.id + ' · ' + p.name, rows: [
           ['Brand', p.brand], ['Source', p.source], ['Price', F.money(p.price)],
           ['Rank', '#' + F.int(p.rank) + ' (lower = better)'], ['Signal score', F.idx(p.score, 0)], ['Trend', F.pct(p.trend)],
@@ -106,33 +104,18 @@
     var tr = DATA.comps.map(function (c) { return c.trend; });
     return { id: 'cell:' + key, cellKey: key, title: lbl(key), points: pts,
       x: { min: 0, max: 110 }, y: { min: Math.min.apply(null, tr) - 0.05, max: Math.max.apply(null, tr) + 0.05 },
-      legend: [{ label: 'Hot product', color: RED }, { label: 'Other product', color: C.comp }], sizeNote: '' };
+      legend: [{ label: 'Competitor product', color: '#a6aaa8' }], sizeNote: '' };
   }
 
   /* ---------- chart B ---------- */
   var qb = Q.assort_client;
-  // With the market shown, both series are drawn as a share of their own total, so the
-  // gap between a filled bubble (our channel) and its circle (market) is directly readable.
-  var TOT = { rev: 0, units: 0, mkt_rev: 0, mkt_units: 0 };
-  D.cells.forEach(function (c) { TOT.rev += c.rev || 0; TOT.units += c.units || 0; TOT.mkt_rev += c.mkt_rev || 0; TOT.mkt_units += c.mkt_units || 0; });
-  function fmtShare(v) { return (v * 100 >= 1 ? (v * 100).toFixed(0) : (v * 100).toPrecision(1)) + '%'; }
-  function xOwn(o) { var r = metric === 'rev', v = r ? o.rev : o.units; return showMkt ? v / (r ? TOT.rev : TOT.units) : v; }
-  function xMkt(o) { var r = metric === 'rev'; return (r ? o.mkt_rev : o.mkt_units) / (r ? TOT.mkt_rev : TOT.mkt_units); }
+  function xOwn(o) { return metric === 'rev' ? o.rev : o.units; }
   function axisB() {
     var r = metric === 'rev';
-    if (showMkt) return {
-      label: 'Share of total ' + (r ? 'revenue' : 'units') + ', 12 weeks (log) · filled = our channel, circle = market',
-      scale: 'log', format: fmtShare, split: (r ? qb.x_split_rev : qb.x_split_units) / (r ? TOT.rev : TOT.units)
-    };
     return {
       label: r ? 'Channel revenue, 12 weeks (log)' : 'Channel units, 12 weeks (log)',
       scale: 'log', format: r ? F.eurK : F.int, split: r ? qb.x_split_rev : qb.x_split_units
     };
-  }
-  function legendB(extra) {
-    var l = extra.slice();
-    if (showMkt) l.push({ label: 'Market share of total (circle right of bubble = we under-index)', color: '#8a8982', hollow: true });
-    return l;
   }
   function rootB() {
     var r = metric === 'rev';
@@ -141,7 +124,7 @@
         id: c.key, x: xOwn(c), y: c.ch_trend, size: c.n_skus, data: c,
         color: c.gap ? RED : c.under ? AMBER : C.client,
         tip: { title: lbl(c.key), rows: [
-          ['SKUs', F.int(c.n_skus) + ' (' + F.int(c.n_active) + ' active, ' + F.int(c.n_inactive) + ' inactive, ' + F.int(c.n_oos) + ' out of stock)'],
+          ['SKUs', F.int(c.n_skus)],
           ['Channel revenue', F.eur(c.rev)], ['Channel units', F.int(c.units)],
           ['Market revenue', F.eur(c.mkt_rev)],
           ['Share of market', F.share(c.share) + ' vs category ' + F.share(M.cat_share)],
@@ -149,11 +132,10 @@
         ].concat(c.under ? [['Under-performing', c.under_reason]] : []).concat(c.gap ? [['Gap', c.gap_reason]] : [])
           .concat(c.rev <= 0 ? [['Note', 'No channel sales: drawn in the 0 lane']] : []) }
       };
-      if (showMkt && nn(c.mk_trend)) p.link = { x: xMkt(c), y: c.mk_trend };
       return p;
     });
     return { id: 'cells', title: 'All cells', points: pts, x: axisB(),
-      legend: legendB([{ label: 'Assortment gap', color: RED }, { label: 'Under-performing', color: AMBER }, { label: 'Other cell', color: C.client }]),
+      legend: [{ label: 'Assortment gap', color: RED }, { label: 'Under-performing', color: AMBER }, { label: 'Other cell', color: C.client }],
       sizeNote: 'Bubble size = number of SKUs' };
   }
   function skuView(key) {
@@ -161,21 +143,18 @@
     var pts = (skusBy[key] || []).filter(function (s) { return nn(s.ch_trend); }).map(function (s) {
       var p = {
         id: s.id, x: xOwn(s), y: s.ch_trend, label: s.id, data: s,
-        color: s.active ? (C[s.stock] || C.client) : C.inactive, hollow: !s.active, dashed: !s.active,
+        color: C.client,
         tip: { title: s.id + ' · ' + s.name, rows: [
-          ['Brand', s.brand], ['Status', s.active ? 'Active' : 'Inactive'],
-          ['Stock', { in_stock: 'In stock', low_stock: 'Low stock', out_of_stock: 'Out of stock' }[s.stock] || s.stock],
+          ['Brand', s.brand],
           ['Price', F.money(s.price)], ['Channel revenue', F.eur(s.rev)], ['Channel units', F.int(s.units)],
           ['Share of market', F.share(s.share)], ['Channel trend', F.pct(s.ch_trend)], ['Market trend', F.pct(s.mk_trend)],
           ['Supplier', s.supplier]
         ].concat(s.rev <= 0 ? [['Note', 'No channel sales: drawn in the 0 lane']] : []) }
       };
-      if (showMkt && nn(s.mk_trend)) p.link = { x: xMkt(s), y: s.mk_trend };
       return p;
     });
     return { id: 'cell:' + key, cellKey: key, title: lbl(key), points: pts, x: axisB(),
-      legend: legendB([{ label: 'In stock', color: C.in_stock }, { label: 'Low stock', color: C.low_stock },
-        { label: 'Out of stock', color: C.out_of_stock }, { label: 'Inactive', color: C.inactive, hollow: true }]), sizeNote: '' };
+      legend: [{ label: 'Your SKU', color: C.client }], sizeNote: '' };
   }
   function renderB() {
     var k = drillKey(B);
@@ -190,7 +169,6 @@
   var detail = UI.card('All cells', 'Click a row to select the cell in both charts.');
   var detailBody = el('div');
   detail.appendChild(detailBody);
-  app.appendChild(detail);
 
   function flags(r) {
     var o = [];
@@ -286,6 +264,7 @@
 
   A = QuadChart.create(hostA, {
     height: 460,
+    source: 'Source: competitor_market_signals.csv · observation ' + M.observed_date + '; coverage: sku_performance.csv.',
     x: { label: 'Competitor popularity: mean signal score (0–100, higher = more popular)', scale: 'linear', format: function (v) { return F.int(v); }, split: qa.x_split },
     y: { label: 'Competitor trend, 12 weeks', scale: 'linear', format: function (v) { return F.pct(v); }, split: qa.y_split },
     quadrants: { tl: qa.tl, tr: qa.tr, bl: qa.bl, br: qa.br }, tints: { tr: 'good' },
@@ -305,7 +284,7 @@
   renderDetail();
 
   /* ---------- lists ---------- */
-  var cGap = UI.card('Assortment gaps', 'Cells where competitors have hot products and we have thin coverage, and delisted SKUs sitting in strong markets. Click a row to open the cell.');
+  var cGap = UI.card('Assortment actions', 'Missing cells with popular, rising competitor signals, plus delisted SKUs in strong markets. Click a row to open the cell.');
   var gapRows = D.lists.gaps.map(function (g) {
     var s = g.sku_id ? UI.sku(g.sku_id) : null;
     return { type: g.type, key: g.key, sku: s ? s.id + ' · ' + s.name : '', reason: g.reason, prize_low: g.prize_low, prize_high: g.prize_high };
@@ -315,18 +294,34 @@
     { key: 'key', label: 'Cell', fmt: function (v) { return lbl(v); } },
     { key: 'sku', label: 'SKU', fmt: function (v) { return v || '–'; } },
     { key: 'reason', label: 'Reason' },
-    { key: 'prize_high', label: 'Prize (per ' + M.period_weeks + ' wks)', num: true, fmt: function (v, r) { return v == null ? '–' : F.eurK(r.prize_low) + ' – ' + F.eurK(r.prize_high); } }
+    { key: 'prize_high', label: 'Prize (per ' + M.period_weeks + ' wks)', num: true, fmt: function (v, r) { return v == null ? '–' : F.prize(r.prize_low) + ' – ' + F.prize(r.prize_high); } }
   ], rows: gapRows, maxHeight: 360, onRowClick: function (r) { select(r.key, 'both', true); } });
   app.appendChild(cGap);
+
+  var peerRows = D.lists.gaps.filter(function (g) { return g.type === 'cell' && g.peer_n > 0; });
+  if (peerRows.length) {
+    var peers = UI.card('Size of prize · missing assortment', 'Illustrative 12-week revenue range from represented peer cells with similar competitor popularity and trend. These are peer observations, not measured demand or a forecast for the missing cell.');
+    UI.table(peers, { columns: [
+      { key: 'key', label: 'Missing cell', fmt: function (v) { return lbl(v); } },
+      { key: 'prize_high', label: 'Peer revenue range', num: true, fmt: function (v, r) { return F.prize(r.prize_low) + ' – ' + F.prize(r.prize_high); } },
+      { key: 'peer_keys', label: 'Comparable represented cells', fmt: function (v) { return (v || []).map(lbl).join('; '); } },
+      { key: 'peer_sku_ids', label: 'Peer SKUs', fmt: function (v) { return (v || []).join(', '); } },
+      { key: 'peer_basis', label: 'Estimation basis' }
+    ], rows: peerRows, onRowClick: function (r) { select(r.key, 'both', true); } });
+    peers.appendChild(el('p', { class: 'note', text: 'Source: competitor_market_signals.csv and sku_performance.csv. Ranges use the lowest and highest observed revenue among up to three nearest represented cells by normalized signal score and trend. Peer sets may overlap; the combined scenario assumes each new cell adds incremental revenue without cannibalizing existing sales.' }));
+    app.appendChild(peers);
+  }
+
 
   var cUnder = UI.card('Under-performing cells', 'Cells selling below the share threshold. Click a row to open the cell.');
   UI.table(cUnder, { columns: [
     { key: 'key', label: 'Cell', fmt: function (v) { return lbl(v); } },
     { key: 'share', label: 'Share vs category share', num: true, fmt: function (v) { return F.share(v) + ' vs ' + F.share(M.cat_share); } },
     { key: 'reason', label: 'Reason' },
-    { key: 'prize_high', label: 'Prize, high case', num: true, fmt: function (v) { return F.eur(v); } }
+    { key: 'prize_high', label: 'Prize, high case', num: true, fmt: function (v) { return F.prize(v); } }
   ], rows: D.lists.under_cells, sort: { key: 'prize_high', dir: 'desc' }, maxHeight: 360, onRowClick: function (r) { select(r.key, 'both', true); } });
   app.appendChild(cUnder);
+  app.appendChild(detail);
 
   app.appendChild(el('p', { class: 'caveat', text: 'Competitor signals are one snapshot (' + M.observed_date + ') from mixed sources (retailers, search, social): they show direction, not volume.' }));
 })();

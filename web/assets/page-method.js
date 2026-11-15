@@ -52,13 +52,14 @@
   app.appendChild(c2);
 
   // Prize
-  var c3 = UI.card('Size-of-prize scenarios', 'Illustrative ranges per ' + D.meta.period_weeks + ' weeks, not forecasts. They overlap partly, so do not add them together.');
+  var c3 = UI.card('Size-of-prize scenarios', 'Illustrative ranges per ' + D.meta.period_weeks + ' weeks, not forecasts. The combined total accounts for overlapping SKU actions.');
+  if (D.opportunity_total) c3.appendChild(el('p', { class: 'note', text: 'Combined: ' + F.prize(D.opportunity_total.low) + '–' + F.prize(D.opportunity_total.high) + '. ' + D.opportunity_total.basis }));
   var basis = {};
   M.prize_bases.forEach(function (b) { basis[b.q] = b.text; });
   plain(c3, [
     { key: 'q', label: 'Question', fmt: function (v) { return 'Q' + v; } },
     { key: 'action', label: 'Recommendation' },
-    { key: 'prize_low', label: 'Range', num: true, fmt: function (v, r) { return F.eurK(r.prize_low) + ' – ' + F.eurK(r.prize_high) + ' (' + r.prize_unit + ')'; } },
+    { key: 'prize_low', label: 'Range', num: true, fmt: function (v, r) { return F.prize(r.prize_low) + ' – ' + F.prize(r.prize_high) + ' (' + r.prize_unit + ')'; } },
     { key: 'basis', label: 'How it is calculated', fmt: function (v, r) { return basis[r.q] || r.basis; } }
   ], D.recs.slice().sort(function (a, b) { return a.q - b.q; }));
   app.appendChild(c3);

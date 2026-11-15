@@ -61,9 +61,9 @@ TM = {
     "prize_high_recovery": ("Prize, high case: share of the amount at stake that is recovered", "ratio", ["Recommendations"]),
     "prize_high_lowstock": ("Prize, high case: share of low-stock revenue in rising markets", "ratio", ["Availability"]),
 }
-REC_SORT = "prize"  # "prize" = largest high-end prize first; "question" = question order 1-4
+REC_SORT = "question"  # "prize" = largest high-end prize first; "question" = question order 1-4
 
-MONEY_KEYS = {"price", "rev", "mkt_rev", "mkt_asp", "prize_low", "prize_high", "total_rev", "total_mkt_rev",
+MONEY_KEYS = {"price", "rev", "mkt_rev", "mkt_asp", "target_price", "cost_proxy", "revenue_change_at_target", "gross_profit_change_at_target", "low", "high", "prize_low", "prize_high", "total_rev", "total_mkt_rev",
               "comp_price", "client_price_median", "comp_price_median", "rev_in", "rev_low", "rev_oos",
               "rev_exposed", "median_sku_rev", "rev_p25", "rev_p75", "median_cell_rev", "x_split_rev"}
 
@@ -229,7 +229,9 @@ def build_cells(skus, comps, S):
                              if cell["ch_trend"] is not None and cell["mk_trend"] is not None else None)
         cell["price_idx_comp"] = div(cell["client_price_median"], cell["comp_price_median"]) \
             if cell["client_price_median"] and cell["comp_price_median"] else None
-        cell["gap"] = cell["n_hot"] >= 1 and cell["coverage"] <= T["gap_max_coverage"]
+        cell["gap"] = (cell["n_skus"] == 0 and cell["comp_score_mean"] is not None
+                       and cell["comp_score_mean"] >= T["comp_popular_score"]
+                       and cell["comp_trend_mean"] >= T["comp_rising_trend"])
         hot_txt = f"{plural(cell['n_hot'], 'hot competitor product')} (popular and rising)"
         if not cell["gap"]:
             cell["gap_reason"] = ""
@@ -243,6 +245,16 @@ def build_cells(skus, comps, S):
         cell["under_reason"] = (f"Share {share(cell['share'])} of a {eur(mkt_rev)} market vs {share(S['cat_share'])} for the "
                                 f"category (threshold {share(T['under_share_ratio'] * S['cat_share'])})") if cell["under"] else ""
         cells.append(cell)
+    peers = [c for c in cells if c["n_skus"] and c["n_comp"]]
+    for c in cells:
+        if not c["gap"]:
+            continue
+        ranked = sorted(peers, key=lambda p: (abs(p["comp_score_mean"] - c["comp_score_mean"]) / 100
+                          + abs(p["comp_trend_mean"] - c["comp_trend_mean"]), p["key"]))[:3]
+        c.update(peer_keys=[p["key"] for p in ranked], peer_sku_ids=[i for p in ranked for i in p["sku_ids"]],
+                 peer_n=len(ranked), prize_low=min((p["rev"] for p in ranked), default=0),
+                 prize_high=max((p["rev"] for p in ranked), default=0),
+                 peer_basis="Nearest three represented competitor cells by |score difference|/100 + |trend difference|; min–max observed 12-week cell revenue. Sparse, cross-subcategory analogues; signals are not sales forecasts.")
     return cells
 
 
@@ -291,21 +303,11 @@ def build_suppliers(skus):
 # --- 4. lists and prizes -----------------------------------------------------------
 def price_signals(s, S):
     """Return [(signal, direction)] for one SKU; direction is "above" or "below"."""
-    sig, m = [], s["match"]
-    if m and abs(m["gap"]) >= T["price_gap_exact"]:
-        d = "above" if m["gap"] > 0 else "below"
-        sig.append(({"code": "exact", "label": f"Priced {d} the identical competitor product",
-                     "detail": f"€{s['price']:.2f} vs €{m['comp_price']:.2f} at {m['source']} ({m['comp_id']}), {pct(m['gap'])}"}, d))
+    sig = []
     if s["price_idx_mkt"] is not None and abs(s["price_idx_mkt"] - 1) >= T["price_gap_market"]:
         d = "above" if s["price_idx_mkt"] > 1 else "below"
-        sig.append(({"code": "market", "label": f"Priced {d} the market average",
-                     "detail": f"€{s['price']:.2f} vs market average €{s['mkt_asp']:.2f}, {pct(s['price_idx_mkt'] - 1)}"}, d))
-    if s["mk_trend"] >= T["positive_market"] and s["trend_gap"] <= T["trend_gap"]:
-        sig.append(({"code": "trend", "label": "Losing ground while the market grows",
-                     "detail": f"Channel trend {pct(s['ch_trend'])} vs market {pct(s['mk_trend'])}"}, "above"))
-    if s["active"] and s["margin"] < T["low_margin"] and s["rev"] >= S["rev_p75"]:
-        sig.append(({"code": "margin", "label": "Thin margin on a big seller",
-                     "detail": f"Margin {share(s['margin'])} on {eur(s['rev'])} revenue (top quartile, from {eur(S['rev_p75'])})"}, "below"))
+        sig.append(({"code": "market", "label": f"Priced {d} the SKU market unit-price proxy",
+                     "detail": f"€{s['price']:.2f} vs realized market revenue/units €{s['mkt_asp']:.2f}, {pct(s['price_idx_mkt'] - 1)}; not observed shelf price"}, d))
     return sig
 
 
@@ -323,39 +325,40 @@ def build_lists(skus, cells, S):
                 "type": "sku", "key": s["cell"], "sku_id": s["id"],
                 "reason": f"Inactive with {eur(s['rev'])} sales ({share(s['share'])}) in a {eur(s['mkt_rev'])} market growing {pct(s['mk_trend'])}",
                 "prize_low": max(s["mkt_rev"] * p25 - s["rev"], 0.0), "prize_high": max(s["mkt_rev"] * med - s["rev"], 0.0)})
+        strong = s["mkt_unit_share"] >= S["median_mkt_unit_share"]
+        over = s["fair_index"] >= 1
+        s["product_quadrant"] = ("winners" if strong else "niche_strengths") if over else ("under_pushed" if strong else "low_performers")
         # Q2 not pushed enough
-        if (s["active"] and s["stock"] != "out_of_stock" and s["mkt_rev"] >= T["min_market_rev"]
-                and s["mk_trend"] >= T["positive_market"]
-                and (s["fair_index"] <= T["under_index"] or s["trend_gap"] <= T["trend_gap"])):
+        if s["active"] and s["stock"] != "out_of_stock" and s["product_quadrant"] == "under_pushed":
             s["lists"].append("not_pushed")
             tg = s["trend_gap"] <= T["trend_gap"]
             L["not_pushed"].append({
                 "id": s["id"],
-                "reason": f"Market {eur(s['mkt_rev'])} growing {pct(s['mk_trend'])}; channel sells {eur(s['rev'])} ({share(s['share'])} of market) with trend {pct(s['ch_trend'])}",
+                "reason": f"Above-median market unit demand and fair-share index {s['fair_index']:.2f} below 1; market trend {pct(s['mk_trend'])}; channel sells {eur(s['rev'])} ({share(s['share'])} of market) with trend {pct(s['ch_trend'])}",
                 "prize_low": max(s["mkt_rev"] * p25 - s["rev"], lo_r * s["rev"] if tg else 0.0),
                 "prize_high": max(s["mkt_rev"] * med - s["rev"], hi_r * s["rev"] if tg else 0.0)})
         # Q2 low performing
-        if (s["active"] and s["rev"] < S["rev_p25"] and s["ch_trend"] <= T["declining"] and s["mk_trend"] <= T["declining"]):
+        if s["active"] and s["product_quadrant"] == "low_performers":
             s["lists"].append("low_perf")
             L["low_perf"].append({
                 "id": s["id"],
-                "reason": f"{eur(s['rev'])} revenue (bottom quartile, below {eur(S['rev_p25'])}); channel {pct(s['ch_trend'])}, market {pct(s['mk_trend'])}; {s['shelf_cm']} cm shelf"})
+                "reason": f"Below-median market unit demand and fair-share index {s['fair_index']:.2f} below 1; {eur(s['rev'])} revenue; review viability before delisting"})
         # Q3 price review
         sig = price_signals(s, S)
         if sig:
             dirs = [d for _, d in sig]
             codes = [x["code"] for x, _ in sig]
             story = dirs[0] if len(set(dirs)) == 1 else "mixed"
-            tier = "Confirmed" if "exact" in codes or max(dirs.count("above"), dirs.count("below")) >= 2 else "Flag"
-            at_stake = 0.0
-            m = s["match"]
-            if "exact" in codes and m["gap"] < 0:
-                at_stake += (m["comp_price"] - s["price"]) * s["units"]
-            if "margin" in codes:
-                at_stake += max(S["median_margin"] - s["margin"], 0.0) * s["rev"]
+            tier = "Large gap" if abs(s["price_idx_mkt"] - 1) >= 2 * T["price_gap_market"] else "Flag"
+            delta = (s["mkt_asp"] - s["price"]) * s["units"]
+            at_stake = max(delta, 0.0) if s["active"] else 0.0
+            s["cost_proxy"] = s["price"] * (1 - s["margin"])
+            s["margin_at_target"] = (s["mkt_asp"] - s["cost_proxy"]) / s["mkt_asp"]
             s["lists"].append("price_review")
             s["price_signals"], s["price_tier"] = codes, tier
-            L["price_review"].append({"id": s["id"], "tier": tier, "story": story, "signals": [x for x, _ in sig],
+            L["price_review"].append({"id": s["id"], "tier": tier, "story": story, "signals": [x for x, _ in sig], "target_price": s["mkt_asp"],
+                                      "revenue_change_at_target": delta, "margin_at_target": s["margin_at_target"],
+                                      "gross_profit_change_at_target": delta,
                                       "prize_low": lo_r * at_stake, "prize_high": hi_r * at_stake})
         # Q4 restock
         oos = s["active"] and s["stock"] == "out_of_stock"
@@ -378,13 +381,14 @@ def build_lists(skus, cells, S):
             L["under_cells"].append({"key": c["key"], "reason": c["under_reason"], "share": c["share"],
                                      "prize_low": 0.0, "prize_high": max(target - sum(s["rev"] for s in v), 0.0)})
     gap_cells = [{"type": "cell", "key": c["key"], "reason": c["gap_reason"], "n_hot": c["n_hot"],
-                  "coverage": c["coverage"], "comp_ids": c["comp_ids"]}
+                  "coverage": c["coverage"], "comp_ids": c["comp_ids"],
+                  **{k: c[k] for k in ("prize_low", "prize_high", "peer_keys", "peer_sku_ids", "peer_n", "peer_basis")}}
                  for c in sorted((c for c in cells if c["gap"]), key=lambda c: -c["n_hot"])]
     L["gaps"] = gap_cells + sorted(gap_skus, key=lambda g: -g["prize_high"])
     L["under_cells"].sort(key=lambda x: -x["prize_high"])
     L["not_pushed"].sort(key=lambda x: -x["prize_high"])
     L["low_perf"].sort(key=lambda x: sk[x["id"]]["rev"])
-    L["price_review"].sort(key=lambda x: (x["tier"] != "Confirmed", -x["prize_high"], -sk[x["id"]]["rev"]))
+    L["price_review"].sort(key=lambda x: (x["tier"] != "Large gap", -x["prize_high"], -sk[x["id"]]["rev"]))
     L["restock"].sort(key=lambda x: -sk[x["id"]]["rev"])
     return L
 
@@ -400,8 +404,8 @@ def build_recs(skus, cells, suppliers, L, S):
 
     # Q1
     rs = [sk[g["sku_id"]] for g in relist]
-    low = sum(g["prize_low"] for g in relist)
-    high = sum(g["prize_high"] for g in relist) + sum(u["prize_high"] for u in L["under_cells"])
+    low = sum(g["prize_low"] for g in relist + gap_cells)
+    high = sum(g["prize_high"] for g in relist + gap_cells) + sum(u["prize_high"] for u in L["under_cells"])
     ids = " and ".join(s["id"] for s in rs[:3])
     evidence = (f"{ids} sit in markets worth {eur(sum(s['mkt_rev'] for s in rs))} growing at least {pct(min(s['mk_trend'] for s in rs))}, "
                 f"with {eur(sum(s['rev'] for s in rs))} of channel sales" if rs else
@@ -410,7 +414,7 @@ def build_recs(skus, cells, suppliers, L, S):
         "q": 1, "action": f"Relist {plural(len(relist), 'delisted high-demand SKU')} and close {plural(len(gap_cells), 'assortment gap')}; "
                           f"lift {plural(len(L['under_cells']), 'under-performing cell')}",
         "evidence": evidence, "prize_low": low, "prize_high": high, "prize_unit": "revenue",
-        "basis": f"Low: relist SKUs reach the 25th-percentile SKU share ({p25}) of their market. "
+        "basis": "Missing cells: min–max 12-week revenue of the three nearest represented competitor-signal cells (peer IDs in gap rows); sparse analogues, not forecast. " + f"Low: relist SKUs reach the 25th-percentile SKU share ({p25}) of their market. "
                  f"High: relist SKUs reach the median SKU share ({med}) and under-performing cells lift to {share(T['under_share_ratio'] * S['cat_share'])} share "
                  f"({T['under_share_ratio']:.0%} of category share {share(S['cat_share'])}), excluding SKUs counted in other recommendations."})
 
@@ -418,26 +422,20 @@ def build_recs(skus, cells, suppliers, L, S):
     np_ = L["not_pushed"]
     top = sk[np_[0]["id"]] if np_ else None
     recs.append({
-        "q": 2, "action": f"Push {plural(len(np_), 'under-sold SKU')} in growing markets and review {plural(len(L['low_perf']), 'low performer')}",
+        "q": 2, "action": f"Push {plural(len(np_), 'under-sold SKU')} with above-median market demand and review {plural(len(L['low_perf']), 'low performer')}",
         "evidence": (f"{top['id']} has a {eur(top['mkt_rev'])} market growing {pct(top['mk_trend'])}, but the channel sells {eur(top['rev'])} "
                      f"({share(top['share'])} of market) with trend {pct(top['ch_trend'])}" if top else "No SKU meets the not-pushed rule"),
         "prize_low": sum(x["prize_low"] for x in np_), "prize_high": sum(x["prize_high"] for x in np_), "prize_unit": "revenue",
         "basis": f"Low: not-pushed SKUs reach the 25th-percentile SKU share ({p25}) of their market, or keep {lo_r:.0%} of current revenue where the channel trails the market by {abs(T['trend_gap']) * 100:.0f}+ points (the larger). "
-                 f"High: median SKU share ({med}), or {hi_r:.0%} of current revenue where sales are collapsing (the larger)."})
+                 f"High: median SKU share ({med}), or {hi_r:.0%} of current revenue where sales are collapsing (the larger). Only flagged SKUs below these scenario targets receive positive prizes; the whole review list is not monetized."})
 
     # Q3
     pr = L["price_review"]
-    n_conf = sum(p["tier"] == "Confirmed" for p in pr)
-    ex = [sk[p["id"]] for p in pr if sk[p["id"]]["match"] and "exact" in sk[p["id"]]["price_signals"]]
-    ex.sort(key=lambda s: (-(s["units"] > 0), -abs(s["match"]["gap"])))  # prefer a match that actually sells
-    e = ex[0] if ex else None
-    recs.append({
-        "q": 3, "action": f"Review price on {plural(n_conf, 'confirmed SKU')} and check {plural(len(pr) - n_conf, 'more flagged SKU')}",
-        "evidence": (f"{e['id']} is priced at €{e['price']:.2f}, {pct(e['match']['gap'])} vs the identical product at {e['match']['source']} "
-                     f"(€{e['match']['comp_price']:.2f}, {e['match']['comp_id']})" if e else "No SKU has a large gap to an identical competitor product"),
-        "prize_low": sum(p["prize_low"] for p in pr), "prize_high": sum(p["prize_high"] for p in pr), "prize_unit": "gross margin",
-        "basis": f"Low: {lo_r:.0%} of the gross margin at stake. High: {hi_r:.0%} of it. At stake = (competitor price − our price) × units for identical products priced "
-                 f"{T['price_gap_exact']:.0%}+ below a competitor, plus (median margin {share(S['median_margin'])} − margin) × revenue for thin-margin big sellers."})
+    n_conf = sum(p["tier"] == "Large gap" for p in pr)
+    recs.append({"q": 3, "action": f"Review {len(pr)} SKUs priced outside the market-average range",
+        "evidence": "SKU prices are compared with market revenue divided by market units, a realized unit-price proxy rather than observed shelf prices",
+        "prize_low": sum(p["prize_low"] for p in pr), "prize_high": sum(p["prize_high"] for p in pr), "prize_unit": "revenue",
+        "basis": "50–100% movement toward SKU market unit-price proxy for below-proxy active SKUs, constant units. Above-proxy price cuts show signed revenue impact separately and are not positive opportunities. Cost proxy = current price × (1−reported margin); target margin holds that unit cost constant. Reported margin and current price may cover different periods; validate costs, tax, promotions and elasticity before action."})
 
     # Q4
     rl = L["restock"]
@@ -509,18 +507,26 @@ def build_method(skus, comps, cells, S, L, recs):
         {"page": "Price", "name": "Signal: thin margin", "text":
             f"Active SKU with margin below {share(T['low_margin'], 0)} and revenue in the top quartile (from {eur(S['rev_p75'])}); suggests price too low."},
         {"page": "Price", "name": "Price tier", "text":
-            "Confirmed when the identical-product signal fires or at least two signals point the same way (all above or all below); otherwise Flag. "
+            "Large gap when the identical-product signal fires or at least two signals point the same way (all above or all below); otherwise Flag. "
             "Price vs the competitor cell median is context only: competitor pack sizes are unknown."},
         {"page": "Availability", "name": "Restock", "text":
             f"An active SKU that is out of stock, or on low stock in a market growing {pct(T['rising_market'])} or more."},
     ]
+    # Rule descriptions use the same boundaries as the visible default product chart.
+    rules = [r for r in rules if r["page"] not in ("Products", "Price") and r["name"] != "Assortment gap cell"]
+    rules += [
+        {"page": "Assortment", "name": "Assortment gap cell", "text": "No customer SKU and mean competitor score ≥50 and mean trend ≥15% (top-right quadrant). Nearest three represented cells by normalized score/trend distance supply the observed revenue range; peer IDs are retained."},
+        {"page": "Products", "name": "Quadrant decision rules", "text": "Market unit demand splits at the median; fair-share index splits at 1. Active available bottom-right SKUs are under-pushed; active bottom-left SKUs are low performers requiring viability review."},
+        {"page": "Price", "name": "Market unit-price extremes", "text": "Absolute price gap ≥20% vs SKU market revenue/units; Large gap labels gaps ≥40%, indicating magnitude rather than causal confidence. Exact competitor matches are context only. This realized proxy is not shelf price."},
+        {"page": "Price", "name": "Constant-unit scenario", "text": "Move current price toward SKU market unit-price proxy holding units and unit-cost proxy constant. Positive revenue uplifts receive 50–100% ranges; signed price-cut impacts and target margins remain separate. No elasticity or cost forecast is available."},
+    ]
     prize_bases = [{"q": r["q"], "text": r["basis"]} for r in recs]
-    prize_bases.append({"q": 0, "text": "Prizes are illustrative scenarios for 12 weeks, not forecasts. The four ranges overlap partly and are not additive."})
+    prize_bases.append({"q": 0, "text": "12-week scenarios, not forecasts. Individual question ranges overlap. The combined total uses the maximum revenue range per SKU across actions, plus missing-cell peer ranges and residual cell opportunities; no gross profit is added."})
     quad = [
         {"chart": "Assortment: competitor view", "text": f"x = mean competitor signal score of the cell, y = mean competitor trend; splits at {T['comp_popular_score']} and {pct(T['comp_rising_trend'])}; bubble size = number of competitor products."},
         {"chart": "Assortment: our channel view", "text": "x = channel revenue or units of the cell (log), y = revenue-weighted channel trend; x splits at the median cell, y at 0%."},
-        {"chart": "Products", "text": "x = share of market units (log, split at median) or market trend (split at 0%), y = fair-share index (log, split at 1.0 = fair share of demand); bubble size = shelf share."},
-        {"chart": "Price", "text": "x = price index vs market average or vs competitor cell median (split at 1.0), y = channel trend minus market trend (split at 0)."},
+        {"chart": "Products", "text": "x = share of market units (log, split at median SKU demand), y = channel unit share divided by market unit share (log, split at 1.0). Bubble size = shelf share. Inactive and out-of-stock products require separate review before acting."},
+        {"chart": "Price", "text": "x = price index vs SKU realized market unit-price proxy; y = channel revenue (log). Review lines at 0.8 and 1.2 mark ±20% extremes. This is not a quadrant decision chart."},
         {"chart": "Availability", "text": f"x = channel revenue (log, split at median SKU {eur(S['median_sku_rev'])}), y = market trend (split at 0%); colour = stock status."},
     ]
     caveats = [
@@ -529,7 +535,7 @@ def build_method(skus, comps, cells, S, L, recs):
         "Competitor pack sizes are unknown, so competitor price comparisons are indicative.",
         "The data is synthetic: the strongest signals sit in a handful of SKUs, so conclusions rest on few items.",
         "Channel and market 'share' is a ratio of channel revenue to a market-demand proxy, not a true market share.",
-        "Prize figures are illustrative scenarios, not forecasts, and are not additive across questions.",
+        "Question ranges overlap. The separately calculated combined total takes the maximum opportunity per SKU; peer-cell estimates assume no cannibalization and may share a small peer sample.",
     ]
     return {"rules": rules, "prize_bases": prize_bases, "quadrant_notes": quad, "data_questions": dq, "caveats": caveats}
 
@@ -546,12 +552,9 @@ def build_quadrants(S, cells):
                           "bl": "Weak spots: small and shrinking", "br": "At risk: large but shrinking"},
         "products": {"x_split_mkt_unit_share": S["median_mkt_unit_share"], "x_split_mk_trend": 0, "y_split": 1,
                      "tl": "Niche strengths: small demand, we over-index", "tr": "Winners: strong demand, we over-index",
-                     "bl": "Low performers: weak demand, we under-index (delist / mark-down candidates)",
+                     "bl": "Review candidates: weak demand, we under-index",
                      "br": "Under-pushed: demand is there, we under-index"},
-        "price": {"x_split": 1, "y_split": 0,
-                  "tl": "Priced below, keeping pace (room to raise)", "tr": "Priced above, keeping pace",
-                  "bl": "Priced below, losing ground (check execution, not price)",
-                  "br": "Priced above, losing ground (review price)"},
+        "price": {"review_low": 0.8, "review_high": 1.2, "description": "SKU market unit-price proxy vs channel revenue; review extremes, no quadrant rules"},
         "availability": {"x_split": S["median_sku_rev"], "y_split": 0,
                          "tl": "Restock next: smaller, rising market", "tr": "Restock first: big sellers, rising market",
                          "bl": "Low priority", "br": "Keep stocked: big sellers, flat or falling market"},
@@ -588,9 +591,22 @@ def build_data(skus, comps):
         {"label": "Revenue-weighted margin", "value": round(S["weighted_margin"], 6), "fmt": "pct"},
         {"label": "Active SKUs out of stock", "value": n_oos, "fmt": "int"},
     ]
+    candidates = defaultdict(list)
+    for g in L["gaps"]:
+        if g["type"] == "sku":
+            candidates[g["sku_id"]].append(g)
+    for name in ("not_pushed", "price_review", "restock"):
+        for x in L[name]:
+            candidates[x["id"]].append(x)
+    total = {"low": sum(max(x["prize_low"] for x in v) for v in candidates.values()) + sum(g["prize_low"] for g in L["gaps"] if g["type"] == "cell"),
+             "high": sum(max(x["prize_high"] for x in v) for v in candidates.values()) + sum(g["prize_high"] for g in L["gaps"] if g["type"] == "cell") + sum(x["prize_high"] for x in L["under_cells"]),
+             "basis": "12-week scenario, not forecast: highest revenue opportunity/protection per SKU across Q1–Q4, plus disjoint missing-cell peer ranges and residual under-performing cells. Gross profit excluded; assumes complete overlap of actions on the same SKU and no cannibalization across cells."}
+    assert all(total[k] >= 0 for k in ("low", "high")) and total["low"] <= total["high"]
+    assert all(g["peer_n"] > 0 and not next(c for c in cells if c["key"] == g["key"])["n_skus"] for g in L["gaps"] if g["type"] == "cell")
     return {
+        "opportunity_total": total,
         "meta": meta,
-        "thresholds": [{"key": k, "value": v, "unit": TM[k][1], "label": TM[k][0], "used_in": TM[k][2]} for k, v in T.items()],
+        "thresholds": [{"key": k, "value": v, "unit": TM[k][1], "label": TM[k][0], "used_in": TM[k][2]} for k, v in T.items() if k not in {"price_gap_exact", "low_margin", "gap_max_coverage", "under_index", "declining", "positive_market"}],
         "rec_sort": REC_SORT, "kpis": kpis, "skus": skus, "comps": comps, "cells": cells, "brands": brands,
         "suppliers": suppliers, "lists": L, "recs": recs, "quadrants": build_quadrants(S, cells),
         "method": build_method(skus, comps, cells, S, L, recs),
@@ -612,7 +628,7 @@ def clean(v, key=None):
 
 # --- 8. writers --------------------------------------------------------------------
 def prize_text(r):
-    return f"{eur(r['prize_low'])}–{eur(r['prize_high'])} per 12 weeks ({r['prize_unit']}, illustrative)"
+    return f"€{r['prize_low']/1000:,.0f}k–€{r['prize_high']/1000:,.0f}k per 12 weeks ({r['prize_unit']}, illustrative)"
 
 
 def md_table(headers, rows):
@@ -637,25 +653,26 @@ def write_markdown(D):
                 for x in items]
 
     def prize_cell(x):
-        return [f"{eur(x['prize_low'])}–{eur(x['prize_high'])}"]
+        return [f"€{x['prize_low']/1000:,.0f}k–€{x['prize_high']/1000:,.0f}k"]
 
+    out += [f"Combined revenue opportunity/protection: €{D['opportunity_total']['low']/1000:,.0f}k–€{D['opportunity_total']['high']/1000:,.0f}k. {D['opportunity_total']['basis']}", ""]
     out += ["## Q1 · Assortment", "", "### Assortment gap cells", ""]
-    out += md_table(["Cell", "Reason", "Competitor products"],
-                    [[g["key"].replace("|", " · "), g["reason"], ", ".join(g["comp_ids"])] for g in L["gaps"] if g["type"] == "cell"])
+    out += md_table(["Cell", "Reason", "Competitor products", "Peer cells / SKU IDs", "12-week revenue range"],
+                    [[g["key"].replace("|", " · "), g["reason"], ", ".join(g["comp_ids"]), "; ".join(g["peer_keys"]) + " / " + ", ".join(g["peer_sku_ids"]), f"€{g['prize_low']/1000:,.0f}k–€{g['prize_high']/1000:,.0f}k"] for g in L["gaps"] if g["type"] == "cell"])
     out += ["### SKUs to relist", ""]
     relist = [dict(g, id=g["sku_id"]) for g in L["gaps"] if g["type"] == "sku"]
     out += md_table(["ID", "Product", "Status / stock", "Reason", "Prize"], sku_rows(relist, prize_cell))
     out += ["### Under-performing cells", ""]
     out += md_table(["Cell", "Reason", "Prize (high)"],
-                    [[u["key"].replace("|", " · "), u["reason"], eur(u["prize_high"])] for u in L["under_cells"]])
+                    [[u["key"].replace("|", " · "), u["reason"], f"€{u['prize_high']/1000:,.0f}k"] for u in L["under_cells"]])
     out += ["## Q2 · Products", "", "### Not pushed enough", ""]
     out += md_table(["ID", "Product", "Status / stock", "Reason", "Prize"], sku_rows(L["not_pushed"], prize_cell))
     out += ["### Low performing", ""]
     out += md_table(["ID", "Product", "Status / stock", "Reason"], sku_rows(L["low_perf"]))
     out += ["## Q3 · Price", ""]
-    out += md_table(["ID", "Product", "Status / stock", "Tier", "Signals", "Margin prize"],
+    out += md_table(["ID", "Product", "Status / stock", "Tier", "Signals", "Revenue scenario"],
                     [[p["id"], sk[p["id"]]["name"], f"{sk[p['id']]['status']} / {stock_label(sk[p['id']]['stock'])}", p["tier"],
-                      "; ".join(f"{x['label']} ({x['detail']})" for x in p["signals"]), f"{eur(p['prize_low'])}–{eur(p['prize_high'])}"]
+                      "; ".join(f"{x['label']} ({x['detail']})" for x in p["signals"]), f"€{p['prize_low']/1000:,.0f}k–€{p['prize_high']/1000:,.0f}k"]
                      for p in L["price_review"]])
     out += ["## Q4 · Availability", ""]
     out += md_table(["ID", "Product", "Status / stock", "Reason", "Prize"], sku_rows(L["restock"], prize_cell))
@@ -677,7 +694,7 @@ def write_actions_csv(D):
     cols = ["question", "list", "tier", "product_id", "cell", "product_name", "brand", "subcategory", "shade_group", "status",
             "stock_status", "supplier", "price_eur", "channel_revenue_eur_12w", "channel_margin_pct",
             "channel_sales_trend_12w_pct", "market_revenue_eur_12w", "market_sales_trend_12w_pct", "reason",
-            "prize_low_eur", "prize_high_eur"]
+            "prize_low_eur", "prize_high_eur", "target_market_unit_price_eur", "signed_revenue_change_at_target_eur", "margin_at_target_proxy", "peer_cells", "peer_sku_ids"]
     rows = []
 
     def add(q, lst, item, sku_id=None, key=None, tier=""):
@@ -691,7 +708,9 @@ def write_actions_csv(D):
         reason = item.get("reason") or "; ".join(f"{x['label']} ({x['detail']})" for x in item.get("signals", []))
         rows.append([q, lst, tier] + [("" if v is None else v) for v in vals] +
                     [reason, round(item.get("prize_low", 0), 2) if "prize_high" in item else "",
-                     round(item["prize_high"], 2) if "prize_high" in item else ""])
+                     round(item["prize_high"], 2) if "prize_high" in item else "",
+                     item.get("target_price", ""), item.get("revenue_change_at_target", ""), item.get("margin_at_target", ""),
+                     "; ".join(item.get("peer_keys", [])), "; ".join(item.get("peer_sku_ids", []))])
 
     for g in L["gaps"]:
         if g["type"] == "cell":

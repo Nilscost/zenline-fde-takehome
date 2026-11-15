@@ -25,14 +25,14 @@
     c.appendChild(E("div", null,
       E("div", { html: U.badge("Q" + rec.q, "q") + ' <span class="note">Recommended action</span>' }),
       E("h3", { text: rec.action }), E("p", { text: rec.evidence }), E("p", { class: "note", text: rec.basis })));
-    c.appendChild(E("div", { class: "pg-prize" }, E("b", { text: F.eur(rec.prize_low) + " – " + F.eur(rec.prize_high) }),
+    c.appendChild(E("div", { class: "pg-prize" }, E("b", { text: F.prize(rec.prize_low) + " – " + F.prize(rec.prize_high) }),
       E("span", { text: "per " + D.meta.period_weeks + " weeks · " + rec.prize_unit + ", illustrative" })));
     return c;
   }
   var rec = D.recs.filter(function (r) { return r.q === 4; })[0];
   app.appendChild(E("div", { class: "page-head" },
-    E("h1", { text: rec ? rec.question : "Are the products available?" }),
-    E("p", { class: "sub", text: "Empty and thin shelves cost the most where a product sells well or its market is growing. Supplier first, then product." })));
+    E("h1", { text: "Restock the highest-priority products first" }),
+    E("p", { class: "sub", text: "Are the products available? Start with the restock priorities, then investigate availability by supplier." })));
   if (rec) app.appendChild(callout(rec));
 
   var skuById = {}; D.skus.forEach(function (s) { skuById[s.id] = s; });
@@ -66,6 +66,7 @@
   supCard.appendChild(legend);
   var barBox = E("div", { class: "pga-svgbox" });
   supCard.appendChild(barBox);
+  supCard.appendChild(E("p", { class: "note", text: "Source: sku_performance.csv; product_metadata.csv · " + D.meta.period_weeks + "-week revenue grouped by current stock status; exposure is not measured lost sales." }));
   app.appendChild(supCard);
 
   var tipEl = E("div", { class: "qc-tip" });
@@ -221,11 +222,12 @@
       { key: "rev", label: "Revenue", num: true, fmt: function (v) { return F.eur(v); } },
       { key: "mk_trend", label: "Market trend", num: true, fmt: function (v) { return F.pct(v); } },
       { key: "reason", label: "Why" },
-      { key: "prize_high", label: "Prize range (revenue)", num: true, fmt: function (v, r) { return F.eur(r.prize_low) + " – " + F.eur(r.prize_high); } }],
+      { key: "prize_high", label: "Prize range (revenue)", num: true, fmt: function (v, r) { return F.prize(r.prize_low) + " – " + F.prize(r.prize_high); } }],
     rows: rsRows, sort: { key: "prize_high", dir: "desc" }, maxHeight: 460, empty: "No restock SKUs for this selection",
     onRowClick: function (r) { selectSupplier(r.supplier, r.id); }
   });
-  app.appendChild(rsCard);
+  app.insertBefore(rsCard, supCard);
+  app.insertBefore(chartCard, supCard);
 
   /* ---- selection logic ---- */
   function applySel() {

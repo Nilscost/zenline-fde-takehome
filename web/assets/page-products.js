@@ -19,7 +19,7 @@
     var l = E("div", null,
       E("div", { html: U.badge("Q" + rec.q, "q") + ' <span class="note">Recommended action</span>' }),
       E("h3", { text: rec.action }), E("p", { text: rec.evidence }), E("p", { class: "note", text: rec.basis }));
-    var r = E("div", { class: "pg-prize" }, E("b", { text: F.eur(rec.prize_low) + " – " + F.eur(rec.prize_high) }),
+    var r = E("div", { class: "pg-prize" }, E("b", { text: F.prize(rec.prize_low) + " – " + F.prize(rec.prize_high) }),
       E("span", { text: "per " + D.meta.period_weeks + " weeks · " + rec.prize_unit + ", illustrative" }));
     c.appendChild(l); c.appendChild(r);
     return c;
@@ -27,8 +27,8 @@
 
   var rec = D.recs.filter(function (r) { return r.q === 2; })[0];
   app.appendChild(E("div", { class: "page-head" },
-    E("h1", { text: rec ? rec.question : "Are you selling the right products?" }),
-    E("p", { class: "sub", text: "Each product is compared with its share of market demand: where demand is strong but our share is low, shelf and promotion are not working hard enough." })));
+    E("h1", { text: "Push high-demand products; review weak performers" }),
+    E("p", { class: "sub", text: "Are you selling the right products? Compare market demand with our fair-share index, then act on the two lists below." })));
   if (rec) app.appendChild(callout(rec));
 
   /* ---- lookups & lists ---- */
@@ -41,7 +41,7 @@
 
   // labelled SKUs: all not-pushed, then low performers with the most shelf space, max 12
   var labelIds = {};
-  D.lists.not_pushed.forEach(function (r) { labelIds[r.id] = 1; });
+  D.lists.not_pushed.slice().sort(function(a,b){return b.prize_high-a.prize_high;}).slice(0,8).forEach(function (r) { labelIds[r.id] = 1; });
   D.lists.low_perf.map(function (r) { return skuById[r.id]; }).filter(Boolean)
     .sort(function (a, b) { return b.shelf_cm - a.shelf_cm; })
     .forEach(function (s) { if (Object.keys(labelIds).length < 12) labelIds[s.id] = 1; });
@@ -53,20 +53,17 @@
   var chartBox = E("div"); chartCard.appendChild(chartBox);
   var tblHead = E("h3", { style: { margin: "16px 0 6px" } });
   var tblBox = E("div");
-  chartCard.appendChild(tblHead); chartCard.appendChild(tblBox);
+  var allCard = U.card("Product detail", "Select a bubble or group to inspect its products.");
+  allCard.appendChild(tblHead); allCard.appendChild(tblBox);
   app.appendChild(chartCard);
 
-  var toggleMode, toggleX;
-  var g1 = E("span"), g2 = E("span");
+  var toggleMode;
+  var g1 = E("span");
   g1.appendChild(E("label", { text: "View" }));
   toggleMode = U.toggle(g1, [{ value: "sku", label: "SKUs" }, { value: "cell", label: "Subcategory × shade" }, { value: "brand", label: "Brand" }], state.mode, function (v) {
     state.mode = v; state.drill = null; state.sel = null; build();
   });
-  g2.appendChild(E("label", { text: "X axis" }));
-  toggleX = U.toggle(g2, [{ value: "share", label: "Market demand: unit share" }, { value: "trend", label: "Market trend" }], state.x, function (v) {
-    state.x = v; build();
-  });
-  tools.appendChild(g1); tools.appendChild(g2);
+  tools.appendChild(g1);
 
   function xAxis() {
     return state.x === "share"
@@ -214,7 +211,7 @@
     if (tbl) tbl.setHighlight(id ? function (r) { return rid(r) === id; } : null);
   }
   function build() {
-    toggleMode.set(state.mode); toggleX.set(state.x);
+    toggleMode.set(state.mode);
     state.sel = null;
     var d = state.drill;
     qc.setView(rootView());
@@ -230,22 +227,22 @@
     selectRow(id);
     chartCard.scrollIntoView({ behavior: "smooth", block: "start" });
   }
-  function prize(r) { return F.eur(r.prize_low) + " – " + F.eur(r.prize_high); }
+  function prize(r) { return F.prize(r.prize_low) + " – " + F.prize(r.prize_high); }
   var grid = E("div", { class: "grid-2" });
   app.appendChild(grid);
 
-  var npCard = U.card("Not pushed enough", "Active SKUs in a growing market where we sell far less than our fair share, or where our sales are falling well behind the market. Click a row to find it in the chart.");
+  var npCard = U.card("Not pushed enough", "Bottom-right quadrant: active SKUs with above-median market demand and a fair-share index below 1, excluding out-of-stock products. Click a row to locate it.");
   var npRows = D.lists.not_pushed.map(function (r) { var s = skuById[r.id] || {}; return Object.assign({ name: s.name }, r); });
   U.table(npCard, {
     columns: [{ key: "id", label: "ID" }, { key: "name", label: "Product" }, { key: "reason", label: "Why" },
       { key: "prize_high", label: "Prize range (revenue)", num: true, fmt: function (v, r) { return prize(r); } }],
-    rows: npRows, sort: { key: "prize_high", dir: "desc" }, onRowClick: function (r) { focusSku(r.id); }, empty: "No SKUs on this list"
+    rows: npRows, maxHeight: 420, sort: { key: "prize_high", dir: "desc" }, onRowClick: function (r) { focusSku(r.id); }, empty: "No SKUs on this list"
   });
   var npLow = 0, npHigh = 0; npRows.forEach(function (r) { npLow += r.prize_low; npHigh += r.prize_high; });
-  npCard.appendChild(E("p", { class: "note", text: "Per-SKU prizes are illustrative revenue scenarios for " + D.meta.period_weeks + " weeks. Their sum, " + F.eur(npLow) + " – " + F.eur(npHigh) + ", matches the recommendation range above." }));
+  npCard.appendChild(E("p", { class: "note", text: "Per-SKU prizes are illustrative revenue scenarios for " + D.meta.period_weeks + " weeks. Their sum, " + F.prize(npLow) + " – " + F.prize(npHigh) + ", matches the recommendation range above." }));
   grid.appendChild(npCard);
 
-  var lpCard = U.card("Low performing", "Active SKUs in the bottom quartile of channel revenue where both our sales and the market are falling. Candidates to delist or reduce.");
+  var lpCard = U.card("Low performing", "Bottom-left quadrant: active SKUs with below-median market demand and a fair-share index below 1. Review for delisting or shelf reduction.");
   var lpRows = D.lists.low_perf.map(function (r) { var s = skuById[r.id] || {}; return Object.assign({ name: s.name, shelf_cm: s.shelf_cm, rev: s.rev }, r); });
   U.table(lpCard, {
     columns: [{ key: "id", label: "ID" }, { key: "name", label: "Product" }, { key: "reason", label: "Why" },
@@ -258,5 +255,6 @@
     F.eur(rv) + " (" + F.share(rv / D.meta.total_rev) + " of channel revenue) over " + D.meta.period_weeks + " weeks." }));
   grid.appendChild(lpCard);
 
+  app.appendChild(allCard);
   build();
 })();
