@@ -12,12 +12,19 @@ A category opportunity review for ZenBeauty's hair coloration range, as an offli
 | Page | Question | What it shows |
 |---|---|---|
 | Recommendations | – | One action per question, with its estimated size of prize. |
-| 1 Assortment | Do we have the right range? | Products to relist, missing subcategory × shade groups, under-sold groups. |
-| 2 Products | Are the right products pushed? | Under-sold products with strong demand, and low performers to review. |
-| 3 Price | Is the price right? | Products priced well above or below the market average, with target prices. |
-| 4 Availability | Are products in stock? | Restock priorities by product, then availability by supplier. |
+| 1 Assortment | Do you have the right assortment? | Products to relist, missing subcategory × shade groups, under-sold groups. |
+| 2 Products | Are you selling the right products? | Under-sold products with strong demand, and low performers to review. |
+| 3 Price | Are you selling at the right price? | Products priced well above or below the market average, with target prices. |
+| 4 Availability | Are the products available? | Restock priorities by product, then availability by supplier. |
 
 The **Method** page lists every rule, threshold and assumption.
+
+## Implementation choices
+
+- **Rules, not a score.** Every flag follows a plain rule a category manager can read and challenge on the Method page.
+- **One script, one data file.** `review.py` computes everything and writes a single data file; the pages only display it, so every number traces back to the CSVs.
+- **No dependencies.** Standard-library Python and hand-written charts, so the site opens from disk and can be emailed.
+- **Thresholds in one place.** All cut-offs and assumptions sit in one dictionary at the top of `review.py`.
 
 ## Estimated size of prize
 
