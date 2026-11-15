@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """Category opportunity review for ZenBeauty Retail (Beauty > Hair Coloration).
 
-Reads the three CSVs in data/, applies a small set of transparent rules and
-writes:
-  output/category_review.html   stakeholder-facing review (open in a browser)
-  output/recommendations.md     the same recommendations as plain Markdown
-  output/actions.csv            every flagged SKU, one row per (SKU, action)
+Reads the three CSVs in data/, applies a small set of transparent rules and writes:
+  output/<copy of web/>          the interactive multi-page site (hand-written, in web/)
+  output/assets/data.js          window.DATA: every number the site shows
+  output/recommendations.md      the recommendations as plain Markdown
+  output/actions.csv             every flagged item, one row per (item, list)
 
 Standard library only:  python3 review.py
 """
 import csv
-import html
+import json
+import shutil
 import statistics
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -18,437 +19,725 @@ from pathlib import Path
 ROOT = Path(__file__).parent
 DATA = ROOT / "data"
 OUT = ROOT / "output"
+GENERATED = "2026-11-15"
 
-# --- Rule thresholds: every recommendation traces back to these numbers. ------
+# --- Business thresholds: every list and prize traces back to these numbers. ---
 T = {
-    "rising_market": 0.20,       # market trend that counts as clearly rising
-    "positive_market": 0.10,     # market trend that counts as positive
-    "min_market_rev": 25_000,    # ignore SKUs whose 12w market is smaller (EUR)
-    "weak_share": 0.01,          # channel/market revenue share that counts as "not selling"
-    "trend_gap": -0.30,          # channel trend minus market trend: execution gap
-    "price_gap": 0.15,           # price difference vs. same product at a competitor
-    "low_margin": 0.25,          # margin that counts as thin
-    "declining": -0.15,          # trend that counts as declining (channel and market)
-    "shade_under_index": 0.60,   # shade share below this fraction of category share
-    "shade_comp_trend": 0.15,    # competitor trend that counts as rising for a shade
+    "min_market_rev": 25_000,     # ignore SKUs/cells whose 12-week market revenue is smaller (EUR)
+    "positive_market": 0.10,      # market trend that counts as positive
+    "rising_market": 0.20,        # market trend that counts as clearly rising
+    "declining": -0.15,           # trend that counts as declining (channel and market)
+    "comp_popular_score": 50,     # competitor signal score that counts as popular (0-100)
+    "comp_rising_trend": 0.15,    # competitor trend that counts as rising
+    "gap_max_coverage": 1,        # a cell with at most this many active, in-stock SKUs has thin coverage
+    "under_share_ratio": 0.60,    # cell share below this fraction of category share = under-performing
+    "weak_share": 0.01,           # channel/market revenue share that counts as "not selling"
+    "under_index": 0.25,          # fair-share index at or below this = under-indexed vs market demand
+    "trend_gap": -0.30,           # channel trend minus market trend: losing ground vs the market
+    "price_gap_exact": 0.15,      # price gap vs the identical product at a competitor
+    "price_gap_market": 0.20,     # price gap vs the market average selling price
+    "low_margin": 0.25,           # margin that counts as thin
+    "prize_low_recovery": 0.5,    # prize, low case: share of the revenue/margin at stake that is recovered
+    "prize_high_recovery": 1.0,   # prize, high case: share of the revenue/margin at stake that is recovered
+    "prize_high_lowstock": 0.25,  # prize, high case: share of low-stock revenue in rising markets at stake
 }
+# label, unit and the pages that use each threshold (shown on the Method page).
+TM = {
+    "min_market_rev": ("Smallest 12-week market worth acting on", "eur", ["Assortment", "Products"]),
+    "positive_market": ("Market trend that counts as positive", "pct", ["Products", "Price"]),
+    "rising_market": ("Market trend that counts as clearly rising", "pct", ["Assortment", "Availability"]),
+    "declining": ("Trend that counts as declining (channel and market)", "pct", ["Products"]),
+    "comp_popular_score": ("Competitor signal score that counts as popular", "score", ["Assortment"]),
+    "comp_rising_trend": ("Competitor trend that counts as rising", "pct", ["Assortment"]),
+    "gap_max_coverage": ("Active, in-stock SKUs at or below which a cell has thin coverage", "count", ["Assortment"]),
+    "under_share_ratio": ("Cell share below this fraction of category share = under-performing", "ratio", ["Assortment"]),
+    "weak_share": ("Revenue share of market that counts as not selling", "pct", ["Assortment", "Products"]),
+    "under_index": ("Fair-share index at or below which a SKU is under-indexed", "ratio", ["Products"]),
+    "trend_gap": ("Channel trend minus market trend that counts as losing ground", "pct", ["Products", "Price"]),
+    "price_gap_exact": ("Price gap vs the identical competitor product", "pct", ["Price"]),
+    "price_gap_market": ("Price gap vs the market average selling price", "pct", ["Price"]),
+    "low_margin": ("Margin that counts as thin", "pct", ["Price"]),
+    "prize_low_recovery": ("Prize, low case: share of the amount at stake that is recovered", "ratio", ["Recommendations"]),
+    "prize_high_recovery": ("Prize, high case: share of the amount at stake that is recovered", "ratio", ["Recommendations"]),
+    "prize_high_lowstock": ("Prize, high case: share of low-stock revenue in rising markets", "ratio", ["Availability"]),
+}
+REC_SORT = "prize"  # "prize" = largest high-end prize first; "question" = question order 1-4
 
-NUMERIC = [
-    "price_eur", "channel_revenue_eur_12w", "channel_units_sold_12w",
-    "channel_margin_pct", "channel_sales_trend_12w_pct",
-    "market_revenue_eur_12w", "market_units_sold_12w", "market_sales_trend_12w_pct",
-]
+MONEY_KEYS = {"price", "rev", "mkt_rev", "mkt_asp", "prize_low", "prize_high", "total_rev", "total_mkt_rev",
+              "comp_price", "client_price_median", "comp_price_median", "rev_in", "rev_low", "rev_oos",
+              "rev_exposed", "median_sku_rev", "rev_p25", "rev_p75", "median_cell_rev", "x_split_rev"}
+
+OWNERS = {1: "Category manager + buying", 2: "Category manager + store operations", 3: "Pricing",
+          4: "Supply chain + supplier managers"}
+QUESTIONS = {1: "Do you have the right assortment?", 2: "Are you selling the right products?",
+             3: "Are you selling at the right price?", 4: "Are the products available?"}
+PAGES = {1: "assortment.html", 2: "products.html", 3: "price.html", 4: "availability.html"}
 
 
+# --- formatting helpers ---------------------------------------------------------
+def eur(x):
+    return f"€{x:,.0f}"
+
+
+def pct(x, dp=0):
+    return f"{x * 100:+.{dp}f}%".replace("-", "−")
+
+
+def share(x, dp=1):
+    return f"{x * 100:.{dp}f}%"
+
+
+def div(a, b):
+    return a / b if b else None
+
+
+def plural(n, word, many=None):
+    return f"{n} {word if n == 1 else (many or word + 's')}"
+
+
+def stock_label(s):
+    return s.replace("_", " ")
+
+
+# --- 1. load -----------------------------------------------------------------------
 def read_csv(name):
     with open(DATA / name, newline="", encoding="utf-8") as f:
         return list(csv.DictReader(f))
 
 
 def load():
+    """Join the SKU performance and metadata files on product_id (names repeat, IDs do not)."""
     meta = {r["product_id"]: r for r in read_csv("product_metadata.csv")}
-    skus = read_csv("sku_performance.csv")
-    for r in skus:
-        for k in NUMERIC:
-            r[k] = float(r[k])
+    skus = []
+    for r in read_csv("sku_performance.csv"):
         m = meta[r["product_id"]]
-        r["supplier"] = m["supplier"]
-        r["shelf_cm"] = int(m["shelf_space_cm"])
-        r["rev"] = r["channel_revenue_eur_12w"]
-        r["mkt"] = r["market_revenue_eur_12w"]
-        r["ch_trend"] = r["channel_sales_trend_12w_pct"]
-        r["mk_trend"] = r["market_sales_trend_12w_pct"]
-        r["margin"] = r["channel_margin_pct"]
-        r["share"] = r["rev"] / r["mkt"]
-        r["active"] = r["status"] == "aktiv"
-    comps = read_csv("competitor_market_signals.csv")
+        skus.append({
+            "id": r["product_id"], "name": r["product_name"], "brand": r["brand"], "sub": r["subcategory"],
+            "shade": r["shade_group"], "cell": f"{r['subcategory']}|{r['shade_group']}", "season": r["seasonality"],
+            "status": r["status"], "active": r["status"] == "aktiv", "stock": r["stock_status"],
+            "pl": r["private_label"] == "True", "supplier": m["supplier"], "pack": r["pack_size"],
+            "shelf_cm": int(m["shelf_space_cm"]), "price": float(r["price_eur"]),
+            "rev": float(r["channel_revenue_eur_12w"]), "units": int(float(r["channel_units_sold_12w"])),
+            "margin": float(r["channel_margin_pct"]), "ch_trend": float(r["channel_sales_trend_12w_pct"]),
+            "mkt_rev": float(r["market_revenue_eur_12w"]), "mkt_units": int(float(r["market_units_sold_12w"])),
+            "mk_trend": float(r["market_sales_trend_12w_pct"]),
+        })
+    comps = []
+    for r in read_csv("competitor_market_signals.csv"):
+        comps.append({
+            "id": r["competitor_product_id"], "name": r["competitor_product_name"], "brand": r["brand"],
+            "sub": r["subcategory"], "shade": r["shade_group"], "cell": f"{r['subcategory']}|{r['shade_group']}",
+            "price": float(r["price_eur"]), "rank": float(r["rank_or_popularity_signal"]),
+            "score": float(r["signal_score_0_100"]), "source": r["source"], "trend": float(r["trend_score_12w_pct"]),
+            "observed": r["observed_date"],
+        })
     for c in comps:
-        c["price"] = float(c["price_eur"])
-        c["score"] = float(c["signal_score_0_100"])
-        c["trend"] = float(c["trend_score_12w_pct"])
+        c["hot"] = c["score"] >= T["comp_popular_score"] and c["trend"] >= T["comp_rising_trend"]
     return skus, comps
 
 
-# --- formatting helpers --------------------------------------------------------
-def eur(x):
-    return f"€{x:,.0f}"
-
-
-def pct(x, signed=True):
-    return f"{x * 100:+.0f}%" if signed else f"{x * 100:.1f}%"
-
-
-def flag(action, r, reason, value, value_label):
-    return {"action": action, "sku": r, "reason": reason, "value": value, "value_label": value_label}
-
-
-# --- rules ---------------------------------------------------------------------
-def build_flags(skus, comps):
-    med_share = statistics.median(r["share"] for r in skus)
-    revs = sorted(r["rev"] for r in skus)
-    rev_p25, rev_p75 = revs[len(revs) // 4], revs[3 * len(revs) // 4]
-    med_margin = statistics.median(r["margin"] for r in skus)
-    exact = {c["competitor_product_name"].lower(): c for c in comps}
-    flags = []
-
-    def upside(r):  # revenue if the SKU reached the median SKU's share of its market
-        return max(0.0, r["mkt"] * med_share - r["rev"])
-
-    for r in skus:
-        c = exact.get(r["product_name"].lower())
-        thin_share = r["share"] < T["weak_share"] and r["mkt"] >= T["min_market_rev"]
-
-        # 1. Fix availability
-        if r["active"] and r["stock_status"] == "out_of_stock":
-            flags.append(flag("Fix availability", r,
-                f"Active but out of stock; market trend {pct(r['mk_trend'])}, channel trend {pct(r['ch_trend'])}",
-                r["rev"], "12w revenue exposed"))
-        elif r["active"] and r["stock_status"] == "low_stock" and r["mk_trend"] >= T["rising_market"]:
-            flags.append(flag("Fix availability", r,
-                f"Low stock while market grows {pct(r['mk_trend'])}",
-                r["rev"], "12w revenue exposed"))
-
-        # 2. Promote / fix execution: demand is there, the channel is not capturing it
-        if (r["active"] and r["stock_status"] != "out_of_stock"
-                and r["mk_trend"] >= T["positive_market"] and r["mkt"] >= T["min_market_rev"]
-                and (thin_share or r["ch_trend"] - r["mk_trend"] <= T["trend_gap"])):
-            flags.append(flag("Promote / fix execution", r,
-                f"Market {eur(r['mkt'])} growing {pct(r['mk_trend'])}, but channel sells {eur(r['rev'])} "
-                f"(share {pct(r['share'], False)}) with trend {pct(r['ch_trend'])}",
-                *((upside(r), "12w upside at median share") if thin_share
-                  else (r["rev"], "12w revenue at risk"))))
-
-        # 3. Price review: same product priced very differently elsewhere, or thin margin on a big seller
-        if c and abs(r["price_eur"] / c["price"] - 1) >= T["price_gap"]:
-            gap = r["price_eur"] / c["price"] - 1
-            flags.append(flag("Price review", r,
-                f"Our price €{r['price_eur']:.2f} is {pct(gap)} vs €{c['price']:.2f} at {c['source']} "
-                f"({c['competitor_product_id']}, signal score {c['score']:.0f})",
-                abs(r["price_eur"] - c["price"]) * r["channel_units_sold_12w"], "12w price gap × units"))
-        elif r["active"] and r["margin"] < T["low_margin"] and r["rev"] >= rev_p75:
-            flags.append(flag("Price review", r,
-                f"Margin {pct(r['margin'], False)} vs category median {pct(med_margin, False)} "
-                f"on {eur(r['rev'])} revenue (top quartile)",
-                r["rev"] * (med_margin - r["margin"]), "12w margin gap to median"))
-
-        # 4. Relist: delisted and not selling while the market for it is growing
-        if (not r["active"] and thin_share and r["mk_trend"] >= T["rising_market"]):
-            flags.append(flag("Relist / assortment gap", r,
-                f"Inactive with {eur(r['rev'])} sales; market {eur(r['mkt'])} growing {pct(r['mk_trend'])}",
-                upside(r), "12w upside at median share"))
-
-        # 5. Delist / mark down: small, and shrinking both in our channel and in the market
-        if (r["active"] and r["rev"] < rev_p25
-                and r["mk_trend"] <= T["declining"] and r["ch_trend"] <= T["declining"]):
-            flags.append(flag("Delist / mark down", r,
-                f"{eur(r['rev'])} revenue (bottom quartile); channel {pct(r['ch_trend'])}, market {pct(r['mk_trend'])}; "
-                f"{r['shelf_cm']} cm shelf",
-                r["rev"], "12w revenue forgone"))
-
-        # Hygiene: flagged inactive but still selling
-        if not r["active"] and r["rev"] >= rev_p25:
-            flags.append(flag("Status check", r,
-                f"Marked inaktiv but sold {eur(r['rev'])} in 12w ({r['stock_status']})",
-                r["rev"], "12w revenue on inactive SKU"))
-
-    flags.sort(key=lambda f: -f["value"])
-    stats = {"med_share": med_share, "rev_p25": rev_p25, "rev_p75": rev_p75, "med_margin": med_margin}
-    return flags, stats
-
-
-def shade_table(skus, comps):
-    """Roll up own performance and competitor signals per shade group."""
-    cat_share = sum(r["rev"] for r in skus) / sum(r["mkt"] for r in skus)
-    own, comp = defaultdict(list), defaultdict(list)
-    for r in skus:
-        own[r["shade_group"]].append(r)
+# --- 2. SKU metrics ----------------------------------------------------------------
+def sku_metrics(skus, comps):
+    """Add share / index / price fields to every SKU; return category-level statistics."""
+    tot = {k: sum(s[k] for s in skus) for k in ("rev", "units", "mkt_rev", "mkt_units", "shelf_cm")}
+    active = [s for s in skus if s["active"]]
+    # Percentiles: statistics.quantiles(n=4, method="inclusive") for p25/p75, statistics.median for medians.
+    S = {
+        "total_rev": tot["rev"], "total_units": tot["units"], "total_mkt_rev": tot["mkt_rev"],
+        "total_mkt_units": tot["mkt_units"], "total_shelf_cm": tot["shelf_cm"],
+        "cat_share": tot["rev"] / tot["mkt_rev"],
+        "weighted_margin": sum(s["rev"] * s["margin"] for s in skus) / tot["rev"],
+        "sku_share_p25": statistics.quantiles([s["rev"] / s["mkt_rev"] for s in active], n=4, method="inclusive")[0],
+        "sku_share_median": statistics.median(s["rev"] / s["mkt_rev"] for s in active),
+        "median_margin": statistics.median(s["margin"] for s in skus),
+        "rev_p25": statistics.quantiles([s["rev"] for s in skus], n=4, method="inclusive")[0],
+        "rev_p75": statistics.quantiles([s["rev"] for s in skus], n=4, method="inclusive")[2],
+        "median_mkt_unit_share": statistics.median(s["mkt_units"] / tot["mkt_units"] for s in skus),
+        "median_sku_rev": statistics.median(s["rev"] for s in skus),
+    }
+    by_cell = defaultdict(list)
     for c in comps:
-        comp[c["shade_group"]].append(c)
-    rows = []
-    for shade, v in own.items():
-        rev, mkt = sum(r["rev"] for r in v), sum(r["mkt"] for r in v)
-        cs = comp.get(shade, [])
-        row = {
-            "shade": shade, "n": len(v), "oos": sum(r["stock_status"] == "out_of_stock" for r in v),
-            "rev": rev, "mkt": mkt, "share": rev / mkt,
-            "ch_trend": sum(r["ch_trend"] * r["rev"] for r in v) / rev,
-            "mk_trend": sum(r["mk_trend"] * r["mkt"] for r in v) / mkt,
-            "n_comp": len(cs),
-            "comp_trend": statistics.mean(c["trend"] for c in cs) if cs else 0.0,
-            "comps": sorted(cs, key=lambda c: -c["score"]),
+        by_cell[c["cell"]].append(c["price"])
+    by_name = {}
+    for c in comps:
+        by_name.setdefault(c["name"].lower(), c)
+    sku_by_name = {}
+    for s in skus:
+        sku_by_name.setdefault(s["name"].lower(), s["id"])
+    for c in comps:
+        c["match_sku"] = sku_by_name.get(c["name"].lower())
+    for s in skus:
+        s["share"] = s["rev"] / s["mkt_rev"]
+        s["mkt_unit_share"] = s["mkt_units"] / tot["mkt_units"]
+        s["ch_unit_share"] = s["units"] / tot["units"]
+        s["shelf_share"] = s["shelf_cm"] / tot["shelf_cm"]
+        s["fair_index"] = div(s["ch_unit_share"], s["mkt_unit_share"])
+        s["shelf_index"] = div(s["shelf_share"], s["mkt_unit_share"])
+        s["mkt_asp"] = div(s["mkt_rev"], s["mkt_units"])
+        s["price_idx_mkt"] = div(s["price"], s["mkt_asp"]) if s["mkt_asp"] else None
+        med = statistics.median(by_cell[s["cell"]]) if by_cell.get(s["cell"]) else None
+        s["price_idx_comp"] = div(s["price"], med)
+        s["trend_gap"] = s["ch_trend"] - s["mk_trend"]
+        c = by_name.get(s["name"].lower())
+        s["match"] = ({"comp_id": c["id"], "comp_name": c["name"], "comp_price": c["price"], "source": c["source"],
+                       "gap": s["price"] / c["price"] - 1} if c else None)
+        s["lists"], s["price_signals"], s["price_tier"] = [], [], None
+    return S
+
+
+# --- 3. cells, brands, suppliers ---------------------------------------------------
+def wavg(rows, key, weight):
+    w = sum(r[weight] for r in rows)
+    return sum(r[key] * r[weight] for r in rows) / w if w else None
+
+
+def build_cells(skus, comps, S):
+    sk, cm = defaultdict(list), defaultdict(list)
+    for s in skus:
+        sk[s["cell"]].append(s)
+    for c in comps:
+        cm[c["cell"]].append(c)
+    cells = []
+    for key in sorted(set(sk) | set(cm)):
+        v, cs = sk.get(key, []), cm.get(key, [])
+        sub, shade = key.split("|")
+        rev, units = sum(s["rev"] for s in v), sum(s["units"] for s in v)
+        mkt_rev, mkt_units = sum(s["mkt_rev"] for s in v), sum(s["mkt_units"] for s in v)
+        cell = {
+            "key": key, "sub": sub, "shade": shade, "n_skus": len(v),
+            "n_active": sum(s["active"] for s in v), "n_inactive": sum(not s["active"] for s in v),
+            "n_oos": sum(s["stock"] == "out_of_stock" for s in v), "n_low": sum(s["stock"] == "low_stock" for s in v),
+            "coverage": sum(s["active"] and s["stock"] != "out_of_stock" for s in v),
+            "rev": rev, "units": units, "mkt_rev": mkt_rev, "mkt_units": mkt_units,
+            "ch_trend": wavg(v, "ch_trend", "rev") if rev else None,
+            "mk_trend": wavg(v, "mk_trend", "mkt_rev") if v else None,
+            "share": div(rev, mkt_rev),
+            "shelf_cm": sum(s["shelf_cm"] for s in v),
+            "mkt_unit_share": mkt_units / S["total_mkt_units"], "ch_unit_share": units / S["total_units"],
+            "price_idx_mkt": statistics.mean(s["price_idx_mkt"] for s in v) if v else None,
+            "client_price_median": statistics.median(s["price"] for s in v) if v else None,
+            "n_comp": len(cs), "n_hot": sum(c["hot"] for c in cs),
+            "comp_score_mean": statistics.mean(c["score"] for c in cs) if cs else None,
+            "comp_trend_mean": statistics.mean(c["trend"] for c in cs) if cs else None,
+            "comp_rank_best": min(c["rank"] for c in cs) if cs else None,
+            "comp_price_median": statistics.median(c["price"] for c in cs) if cs else None,
+            "sku_ids": [s["id"] for s in v], "comp_ids": [c["id"] for c in cs],
         }
-        why = []
-        if row["share"] < T["shade_under_index"] * cat_share:
-            why.append(f"share {pct(row['share'], False)} vs category {pct(cat_share, False)}")
-        if row["comp_trend"] >= T["shade_comp_trend"] and row["ch_trend"] <= T["declining"]:
-            why.append(f"competitor signals {pct(row['comp_trend'])} while our sales {pct(row['ch_trend'])}")
-        row["why"] = "; ".join(why)
-        rows.append(row)
-    rows.sort(key=lambda r: -r["mkt"])
-    return rows, cat_share
+        cell["shelf_share"] = cell["shelf_cm"] / S["total_shelf_cm"]
+        cell["fair_index"] = div(cell["ch_unit_share"], cell["mkt_unit_share"]) if v else None
+        cell["trend_gap"] = (cell["ch_trend"] - cell["mk_trend"]
+                             if cell["ch_trend"] is not None and cell["mk_trend"] is not None else None)
+        cell["price_idx_comp"] = div(cell["client_price_median"], cell["comp_price_median"]) \
+            if cell["client_price_median"] and cell["comp_price_median"] else None
+        cell["gap"] = cell["n_hot"] >= 1 and cell["coverage"] <= T["gap_max_coverage"]
+        hot_txt = f"{plural(cell['n_hot'], 'hot competitor product')} (popular and rising)"
+        if not cell["gap"]:
+            cell["gap_reason"] = ""
+        elif cell["n_skus"] == 0:
+            cell["gap_reason"] = f"{hot_txt}; we list no SKU in this cell"
+        else:
+            cell["gap_reason"] = (f"{hot_txt}; only {plural(cell['coverage'], 'active, available SKU')} "
+                                  f"of our {cell['n_skus']} in the cell")
+        cell["under"] = bool(cell["share"] is not None and cell["share"] < T["under_share_ratio"] * S["cat_share"]
+                             and mkt_rev >= T["min_market_rev"])
+        cell["under_reason"] = (f"Share {share(cell['share'])} of a {eur(mkt_rev)} market vs {share(S['cat_share'])} for the "
+                                f"category (threshold {share(T['under_share_ratio'] * S['cat_share'])})") if cell["under"] else ""
+        cells.append(cell)
+    return cells
 
 
-def data_checks(skus, comps):
-    inactive = [r for r in skus if not r["active"]]
-    off = sum(1 for r in skus if abs(r["rev"] - r["price_eur"] * r["channel_units_sold_12w"]) > 0.05 * max(r["rev"], 1))
-    names = Counter(r["product_name"] for r in skus)
-    return [
-        f"{len(inactive)} SKUs are marked `inaktiv` but together sold {eur(sum(r['rev'] for r in inactive))} "
-        f"in 12 weeks ({sum(r['rev'] for r in inactive) / sum(r['rev'] for r in skus):.0%} of category revenue); "
-        f"{sum(r['stock_status'] == 'in_stock' for r in inactive)} of them are in stock. "
-        "Confirm what `inaktiv` means (delisted, sell-through, or stale flag) before acting on status.",
-        f"For {off} of {len(skus)} SKUs, revenue differs by more than 5% from list price × units. "
-        "Treated as promotions/price changes during the period; `price_eur` is used as current shelf price.",
-        f"{sum(1 for n in names.values() if n > 1)} product names appear on two SKU IDs (different pack or subcategory), "
-        "and some subcategory labels contradict the product name. Rules therefore key on product_id, never on name.",
-        f"{sum(1 for c in comps if not 0 <= c['score'] <= 100)} competitor signal scores fall outside the documented 0–100 range; "
-        "scores are only used for ordering, not arithmetic.",
-        f"Competitor signals are one snapshot ({comps[0]['observed_date']}) from {len({c['source'] for c in comps})} sources "
-        "of differing quality (retailer listings vs. search/social). Only "
-        f"{sum(1 for c in comps if c['competitor_product_name'].lower() in {r['product_name'].lower() for r in skus})} "
-        "competitor rows are an exact product match to our assortment, so like-for-like price comparison is limited to those.",
-    ]
+def build_brands(skus, S):
+    g = defaultdict(list)
+    for s in skus:
+        g[s["brand"]].append(s)
+    out = []
+    for b, v in sorted(g.items()):
+        rev, units = sum(s["rev"] for s in v), sum(s["units"] for s in v)
+        mkt_rev, mkt_units = sum(s["mkt_rev"] for s in v), sum(s["mkt_units"] for s in v)
+        row = {"key": b, "n_skus": len(v), "n_active": sum(s["active"] for s in v), "rev": rev, "units": units,
+               "mkt_rev": mkt_rev, "mkt_units": mkt_units,
+               "ch_trend": wavg(v, "ch_trend", "rev") if rev else None, "mk_trend": wavg(v, "mk_trend", "mkt_rev"),
+               "share": div(rev, mkt_rev), "mkt_unit_share": mkt_units / S["total_mkt_units"],
+               "ch_unit_share": units / S["total_units"],
+               "shelf_share": sum(s["shelf_cm"] for s in v) / S["total_shelf_cm"],
+               "price_idx_mkt": statistics.mean(s["price_idx_mkt"] for s in v), "sku_ids": [s["id"] for s in v]}
+        row["fair_index"] = div(row["ch_unit_share"], row["mkt_unit_share"])
+        row["trend_gap"] = row["ch_trend"] - row["mk_trend"] if row["ch_trend"] is not None else None
+        out.append(row)
+    return out
 
 
-# --- recommendations -----------------------------------------------------------
-def build_recommendations(flags, shades, skus, comps, stats):
-    by = defaultdict(list)
-    for f in flags:
-        by[f["action"]].append(f)
-    total_rev = sum(r["rev"] for r in skus)
+def build_suppliers(skus):
+    """Stock mix is counted on ACTIVE SKUs (inactive SKUs are not expected to be on shelf)."""
+    g = defaultdict(list)
+    for s in skus:
+        g[s["supplier"]].append(s)
+    out = []
+    for name, v in g.items():
+        a = [s for s in v if s["active"]]
+        part = {k: [s for s in a if s["stock"] == k] for k in ("in_stock", "low_stock", "out_of_stock")}
+        row = {"name": name, "n": len(v), "n_active": len(a), "n_in": len(part["in_stock"]),
+               "n_low": len(part["low_stock"]), "n_oos": len(part["out_of_stock"]),
+               "oos_rate": div(len(part["out_of_stock"]), len(a)), "low_rate": div(len(part["low_stock"]), len(a)),
+               "rev": sum(s["rev"] for s in v), "rev_in": sum(s["rev"] for s in part["in_stock"]),
+               "rev_low": sum(s["rev"] for s in part["low_stock"]), "rev_oos": sum(s["rev"] for s in part["out_of_stock"]),
+               "n_restock": sum("restock" in s["lists"] for s in v), "sku_ids": [s["id"] for s in v]}
+        row["rev_exposed"] = row["rev_low"] + row["rev_oos"]
+        out.append(row)
+    out.sort(key=lambda r: -r["rev_exposed"])
+    return out
+
+
+# --- 4. lists and prizes -----------------------------------------------------------
+def price_signals(s, S):
+    """Return [(signal, direction)] for one SKU; direction is "above" or "below"."""
+    sig, m = [], s["match"]
+    if m and abs(m["gap"]) >= T["price_gap_exact"]:
+        d = "above" if m["gap"] > 0 else "below"
+        sig.append(({"code": "exact", "label": f"Priced {d} the identical competitor product",
+                     "detail": f"€{s['price']:.2f} vs €{m['comp_price']:.2f} at {m['source']} ({m['comp_id']}), {pct(m['gap'])}"}, d))
+    if s["price_idx_mkt"] is not None and abs(s["price_idx_mkt"] - 1) >= T["price_gap_market"]:
+        d = "above" if s["price_idx_mkt"] > 1 else "below"
+        sig.append(({"code": "market", "label": f"Priced {d} the market average",
+                     "detail": f"€{s['price']:.2f} vs market average €{s['mkt_asp']:.2f}, {pct(s['price_idx_mkt'] - 1)}"}, d))
+    if s["mk_trend"] >= T["positive_market"] and s["trend_gap"] <= T["trend_gap"]:
+        sig.append(({"code": "trend", "label": "Losing ground while the market grows",
+                     "detail": f"Channel trend {pct(s['ch_trend'])} vs market {pct(s['mk_trend'])}"}, "above"))
+    if s["active"] and s["margin"] < T["low_margin"] and s["rev"] >= S["rev_p75"]:
+        sig.append(({"code": "margin", "label": "Thin margin on a big seller",
+                     "detail": f"Margin {share(s['margin'])} on {eur(s['rev'])} revenue (top quartile, from {eur(S['rev_p75'])})"}, "below"))
+    return sig
+
+
+def build_lists(skus, cells, S):
+    p25, med = S["sku_share_p25"], S["sku_share_median"]
+    lo_r, hi_r = T["prize_low_recovery"], T["prize_high_recovery"]
+    L = {"gaps": [], "under_cells": [], "not_pushed": [], "low_perf": [], "price_review": [], "restock": []}
+    gap_skus = []
+    for s in skus:
+        # Q1 (a) SKU-level gap: delisted, not selling, in a rising market
+        if (not s["active"] and s["share"] < T["weak_share"] and s["mkt_rev"] >= T["min_market_rev"]
+                and s["mk_trend"] >= T["rising_market"]):
+            s["lists"].append("relist")
+            gap_skus.append({
+                "type": "sku", "key": s["cell"], "sku_id": s["id"],
+                "reason": f"Inactive with {eur(s['rev'])} sales ({share(s['share'])}) in a {eur(s['mkt_rev'])} market growing {pct(s['mk_trend'])}",
+                "prize_low": max(s["mkt_rev"] * p25 - s["rev"], 0.0), "prize_high": max(s["mkt_rev"] * med - s["rev"], 0.0)})
+        # Q2 not pushed enough
+        if (s["active"] and s["stock"] != "out_of_stock" and s["mkt_rev"] >= T["min_market_rev"]
+                and s["mk_trend"] >= T["positive_market"]
+                and (s["fair_index"] <= T["under_index"] or s["trend_gap"] <= T["trend_gap"])):
+            s["lists"].append("not_pushed")
+            tg = s["trend_gap"] <= T["trend_gap"]
+            L["not_pushed"].append({
+                "id": s["id"],
+                "reason": f"Market {eur(s['mkt_rev'])} growing {pct(s['mk_trend'])}; channel sells {eur(s['rev'])} ({share(s['share'])} of market) with trend {pct(s['ch_trend'])}",
+                "prize_low": max(s["mkt_rev"] * p25 - s["rev"], lo_r * s["rev"] if tg else 0.0),
+                "prize_high": max(s["mkt_rev"] * med - s["rev"], hi_r * s["rev"] if tg else 0.0)})
+        # Q2 low performing
+        if (s["active"] and s["rev"] < S["rev_p25"] and s["ch_trend"] <= T["declining"] and s["mk_trend"] <= T["declining"]):
+            s["lists"].append("low_perf")
+            L["low_perf"].append({
+                "id": s["id"],
+                "reason": f"{eur(s['rev'])} revenue (bottom quartile, below {eur(S['rev_p25'])}); channel {pct(s['ch_trend'])}, market {pct(s['mk_trend'])}; {s['shelf_cm']} cm shelf"})
+        # Q3 price review
+        sig = price_signals(s, S)
+        if sig:
+            dirs = [d for _, d in sig]
+            codes = [x["code"] for x, _ in sig]
+            story = dirs[0] if len(set(dirs)) == 1 else "mixed"
+            tier = "Confirmed" if "exact" in codes or max(dirs.count("above"), dirs.count("below")) >= 2 else "Flag"
+            at_stake = 0.0
+            m = s["match"]
+            if "exact" in codes and m["gap"] < 0:
+                at_stake += (m["comp_price"] - s["price"]) * s["units"]
+            if "margin" in codes:
+                at_stake += max(S["median_margin"] - s["margin"], 0.0) * s["rev"]
+            s["lists"].append("price_review")
+            s["price_signals"], s["price_tier"] = codes, tier
+            L["price_review"].append({"id": s["id"], "tier": tier, "story": story, "signals": [x for x, _ in sig],
+                                      "prize_low": lo_r * at_stake, "prize_high": hi_r * at_stake})
+        # Q4 restock
+        oos = s["active"] and s["stock"] == "out_of_stock"
+        low = s["active"] and s["stock"] == "low_stock" and s["mk_trend"] >= T["rising_market"]
+        if oos or low:
+            s["lists"].append("restock")
+            L["restock"].append({
+                "id": s["id"],
+                "reason": (f"Active but out of stock; {eur(s['rev'])} revenue in 12 weeks, market {pct(s['mk_trend'])}" if oos else
+                           f"Low stock while the market grows {pct(s['mk_trend'])}; {eur(s['rev'])} revenue in 12 weeks"),
+                "prize_low": lo_r * s["rev"] if oos else 0.0,
+                "prize_high": hi_r * s["rev"] if oos else T["prize_high_lowstock"] * s["rev"]})
+    # Q1 (b) under-performing cells: prize on the cell's SKUs excluding SKUs counted in other prizes
+    counted = {s["id"] for s in skus if set(s["lists"]) & {"relist", "not_pushed", "restock", "price_review"}}
+    sk = {s["id"]: s for s in skus}
+    for c in cells:
+        if c["under"]:
+            v = [sk[i] for i in c["sku_ids"] if i not in counted]
+            target = T["under_share_ratio"] * S["cat_share"] * sum(s["mkt_rev"] for s in v)
+            L["under_cells"].append({"key": c["key"], "reason": c["under_reason"], "share": c["share"],
+                                     "prize_low": 0.0, "prize_high": max(target - sum(s["rev"] for s in v), 0.0)})
+    gap_cells = [{"type": "cell", "key": c["key"], "reason": c["gap_reason"], "n_hot": c["n_hot"],
+                  "coverage": c["coverage"], "comp_ids": c["comp_ids"]}
+                 for c in sorted((c for c in cells if c["gap"]), key=lambda c: -c["n_hot"])]
+    L["gaps"] = gap_cells + sorted(gap_skus, key=lambda g: -g["prize_high"])
+    L["under_cells"].sort(key=lambda x: -x["prize_high"])
+    L["not_pushed"].sort(key=lambda x: -x["prize_high"])
+    L["low_perf"].sort(key=lambda x: sk[x["id"]]["rev"])
+    L["price_review"].sort(key=lambda x: (x["tier"] != "Confirmed", -x["prize_high"], -sk[x["id"]]["rev"]))
+    L["restock"].sort(key=lambda x: -sk[x["id"]]["rev"])
+    return L
+
+
+# --- 5. recommendations ------------------------------------------------------------
+def build_recs(skus, cells, suppliers, L, S):
+    sk = {s["id"]: s for s in skus}
+    relist = [g for g in L["gaps"] if g["type"] == "sku"]
+    gap_cells = [g for g in L["gaps"] if g["type"] == "cell"]
+    p25, med = share(S["sku_share_p25"]), share(S["sku_share_median"])
+    lo_r, hi_r = T["prize_low_recovery"], T["prize_high_recovery"]
     recs = []
 
-    f = by["Fix availability"]
-    oos = [x for x in f if x["sku"]["stock_status"] == "out_of_stock"]
-    low = [x for x in f if x["sku"]["stock_status"] == "low_stock"]
-    sup, n = Counter(x["sku"]["supplier"] for x in f).most_common(1)[0]
-    sup_rev = sum(x["value"] for x in f if x["sku"]["supplier"] == sup)
+    # Q1
+    rs = [sk[g["sku_id"]] for g in relist]
+    low = sum(g["prize_low"] for g in relist)
+    high = sum(g["prize_high"] for g in relist) + sum(u["prize_high"] for u in L["under_cells"])
+    ids = " and ".join(s["id"] for s in rs[:3])
+    evidence = (f"{ids} sit in markets worth {eur(sum(s['mkt_rev'] for s in rs))} growing at least {pct(min(s['mk_trend'] for s in rs))}, "
+                f"with {eur(sum(s['rev'] for s in rs))} of channel sales" if rs else
+                f"{plural(len(gap_cells), 'cell')} have hot competitor products but at most {T['gap_max_coverage']} in-stock SKU")
     recs.append({
-        "action": "Fix availability", "owner": "Supply chain + supplier managers",
-        "title": f"Restore stock on {len(f)} active SKUs carrying {eur(sum(x['value'] for x in f))} of 12-week revenue",
-        "summary": f"{len(oos)} active SKUs are out of stock ({eur(sum(x['value'] for x in oos))} revenue, "
-                   f"{sum(x['value'] for x in oos) / total_rev:.1%} of the category) and {len(low)} more are on low stock "
-                   f"while their market grows ≥{pct(T['rising_market'])}. "
-                   f"{sup} supplies {n} of the {len(f)} ({eur(sup_rev)}), so one supplier conversation covers the largest share.",
-        "next": f"Expedite replenishment in the order shown; raise service level with {sup}. "
-                "The out-of-stock SKUs with a falling market are lower priority: restock but do not over-order.",
-        "caveat": "Stock status is a snapshot with no on-hand quantity or lead time; 'revenue exposed' is the last 12 weeks' sales, not a forecast of lost sales.",
-        "flags": f[:8],
-    })
+        "q": 1, "action": f"Relist {plural(len(relist), 'delisted high-demand SKU')} and close {plural(len(gap_cells), 'assortment gap')}; "
+                          f"lift {plural(len(L['under_cells']), 'under-performing cell')}",
+        "evidence": evidence, "prize_low": low, "prize_high": high, "prize_unit": "revenue",
+        "basis": f"Low: relist SKUs reach the 25th-percentile SKU share ({p25}) of their market. "
+                 f"High: relist SKUs reach the median SKU share ({med}) and under-performing cells lift to {share(T['under_share_ratio'] * S['cat_share'])} share "
+                 f"({T['under_share_ratio']:.0%} of category share {share(S['cat_share'])}), excluding SKUs counted in other recommendations."})
 
-    f = by["Promote / fix execution"]
+    # Q2
+    np_ = L["not_pushed"]
+    top = sk[np_[0]["id"]] if np_ else None
     recs.append({
-        "action": "Promote / fix execution", "owner": "Category manager + store operations",
-        "title": f"Fix execution on {len(f)} listed, stocked SKUs that the market wants but the channel is not selling",
-        "summary": "These SKUs are active and available, the wider market for them is large and growing, yet channel sales "
-                   "are near zero or collapsing. That pattern points to an execution problem (listing, planogram, "
-                   "online visibility, price) rather than a demand problem. About "
-                   f"{eur(sum(x['value'] for x in f))} per 12 weeks is at stake: the upside from reaching the median SKU share "
-                   f"({pct(stats['med_share'], False)} of market revenue) where sales are near zero, plus current revenue where sales are collapsing.",
-        "next": "Check each SKU in store and online this week (is it actually on shelf and findable?), then promote. "
-                "For seasonal shades, time the push to the season.",
-        "caveat": "Sizing is illustrative: upside assumes the SKU can reach the median share of its market proxy. Root cause is not in the data and needs a store/listing check.",
-        "flags": f[:8],
-    })
+        "q": 2, "action": f"Push {plural(len(np_), 'under-sold SKU')} in growing markets and review {plural(len(L['low_perf']), 'low performer')}",
+        "evidence": (f"{top['id']} has a {eur(top['mkt_rev'])} market growing {pct(top['mk_trend'])}, but the channel sells {eur(top['rev'])} "
+                     f"({share(top['share'])} of market) with trend {pct(top['ch_trend'])}" if top else "No SKU meets the not-pushed rule"),
+        "prize_low": sum(x["prize_low"] for x in np_), "prize_high": sum(x["prize_high"] for x in np_), "prize_unit": "revenue",
+        "basis": f"Low: not-pushed SKUs reach the 25th-percentile SKU share ({p25}) of their market, or keep {lo_r:.0%} of current revenue where the channel trails the market by {abs(T['trend_gap']) * 100:.0f}+ points (the larger). "
+                 f"High: median SKU share ({med}), or {hi_r:.0%} of current revenue where sales are collapsing (the larger)."})
 
-    f = by["Price review"]
-    exact = [x for x in f if "vs €" in x["reason"]]
-    thin = [x for x in f if x not in exact]
+    # Q3
+    pr = L["price_review"]
+    n_conf = sum(p["tier"] == "Confirmed" for p in pr)
+    ex = [sk[p["id"]] for p in pr if sk[p["id"]]["match"] and "exact" in sk[p["id"]]["price_signals"]]
+    ex.sort(key=lambda s: (-(s["units"] > 0), -abs(s["match"]["gap"])))  # prefer a match that actually sells
+    e = ex[0] if ex else None
     recs.append({
-        "action": "Price review", "owner": "Pricing",
-        "title": f"Review price on {len(exact)} SKUs far out of line with competitors and {len(thin)} thin-margin top sellers",
-        "summary": f"{len(exact)} SKUs have an exact product match at a competitor with a price gap of at least {T['price_gap']:.0%}: "
-                   f"{sum('is -' in x['reason'] for x in exact)} priced well below (margin left on the table) and "
-                   f"{sum('is +' in x['reason'] for x in exact)} well above (uncompetitive). "
-                   f"Separately, {len(thin)} top-quartile sellers run below {T['low_margin']:.0%} margin against a category median of "
-                   f"{pct(stats['med_margin'], False)}; closing that gap would be worth about {eur(sum(x['value'] for x in thin))} margin per 12 weeks.",
-        "next": "Re-price the two exact matches first (clear evidence). For the thin-margin sellers, check whether the cause is price or cost and take it into supplier negotiations.",
-        "caveat": "Only two like-for-like competitor prices exist. Competitor prices are single observations and pack sizes are not given for competitor rows.",
-        "flags": exact + thin[:6],
-    })
+        "q": 3, "action": f"Review price on {plural(n_conf, 'confirmed SKU')} and check {plural(len(pr) - n_conf, 'more flagged SKU')}",
+        "evidence": (f"{e['id']} is priced at €{e['price']:.2f}, {pct(e['match']['gap'])} vs the identical product at {e['match']['source']} "
+                     f"(€{e['match']['comp_price']:.2f}, {e['match']['comp_id']})" if e else "No SKU has a large gap to an identical competitor product"),
+        "prize_low": sum(p["prize_low"] for p in pr), "prize_high": sum(p["prize_high"] for p in pr), "prize_unit": "gross margin",
+        "basis": f"Low: {lo_r:.0%} of the gross margin at stake. High: {hi_r:.0%} of it. At stake = (competitor price − our price) × units for identical products priced "
+                 f"{T['price_gap_exact']:.0%}+ below a competitor, plus (median margin {share(S['median_margin'])} − margin) × revenue for thin-margin big sellers."})
 
-    f = by["Relist / assortment gap"]
-    hot = [s for s in shades if s["why"]]
-    comp_rows = [c for s in hot for c in s["comps"] if c["trend"] >= T["rising_market"]][:8]
+    # Q4
+    rl = L["restock"]
+    oos = [sk[x["id"]] for x in rl if sk[x["id"]]["stock"] == "out_of_stock"]
+    lows = [sk[x["id"]] for x in rl if sk[x["id"]]["stock"] == "low_stock"]
+    oos_rev, low_rev = sum(s["rev"] for s in oos), sum(s["rev"] for s in lows)
+    sup = suppliers[0]
+    exposed = sum(s["rev_exposed"] for s in suppliers)
     recs.append({
-        "action": "Relist / assortment gap", "owner": "Category manager + buying",
-        "title": f"Relist {len(f)} delisted fashion shades and close the gap in {', '.join(s['shade'] for s in hot)}",
-        "summary": f"{len(f)} inactive SKUs sit in markets worth {eur(sum(x['sku']['mkt'] for x in f))} per 12 weeks that are growing ≥{pct(T['rising_market'])}. "
-                   + " ".join(f"{s['shade']}: {s['why']} ({s['n_comp']} competitor signals, {s['oos']} of {s['n']} SKUs out of stock)." for s in hot),
-        "next": "Relist these SKUs at a competitive price (see price review), and ask suppliers about the rising competitor products listed.",
-        "caveat": "Competitor signals mix retailer rank, search and social data; treat them as direction, not volume. Why the SKUs were delisted is unknown.",
-        "flags": f[:8], "comps": comp_rows,
-    })
-
-    f = by["Delist / mark down"]
-    recs.append({
-        "action": "Delist / mark down", "owner": "Category manager",
-        "title": f"Delist or mark down {len(f)} small SKUs that are shrinking in both channel and market",
-        "summary": f"These {len(f)} active SKUs are in the bottom revenue quartile and declining at least {-T['declining']:.0%} in both our channel and the wider market. "
-                   f"Together they bring {eur(sum(x['value'] for x in f))} per 12 weeks ({sum(x['value'] for x in f) / total_rev:.1%} of category revenue) "
-                   f"but occupy {sum(x['sku']['shelf_cm'] for x in f)} cm of shelf, which can go to the SKUs in recommendations 1, 2 and 4.",
-        "next": "Mark down remaining stock, delist at the next range review, and reallocate the shelf space.",
-        "caveat": f"{sum(x['sku']['private_label'] == 'True' for x in f)} are private label (high margin, own-brand strategy): review those individually. Seasonal SKUs may simply be out of season.",
-        "flags": sorted(f, key=lambda x: x["value"])[:14],
-    })
+        "q": 4, "action": f"Restock {plural(len(oos), 'out-of-stock SKU')} and {plural(len(lows), 'low-stock SKU')} in rising markets; start with {sup['name']}",
+        "evidence": f"{plural(len(oos), 'active SKU')} out of stock carry {eur(oos_rev)} of 12-week revenue, and {sup['name']} alone accounts for {share(sup['rev_exposed'] / exposed, 0)} of exposed revenue",
+        "prize_low": lo_r * oos_rev, "prize_high": hi_r * oos_rev + T["prize_high_lowstock"] * low_rev, "prize_unit": "revenue",
+        "basis": f"Low: {lo_r:.0%} of the 12-week revenue of {plural(len(oos), 'active out-of-stock SKU')}. High: {hi_r:.0%} of it plus "
+                 f"{T['prize_high_lowstock']:.0%} of the 12-week revenue of {plural(len(lows), 'low-stock SKU')} in markets growing {pct(T['rising_market'])} or more."})
+    for r in recs:
+        r.update(page=PAGES[r["q"]], question=QUESTIONS[r["q"]], owner=OWNERS[r["q"]])
     return recs
 
 
-# --- rendering -----------------------------------------------------------------
-SKU_COLS = [
-    ("SKU", lambda f: f["sku"]["product_id"]),
-    ("Product", lambda f: f["sku"]["product_name"]),
-    ("Status / stock", lambda f: f"{f['sku']['status']} / {f['sku']['stock_status'].replace('_', ' ')}"),
-    ("Evidence", lambda f: f["reason"]),
-    ("Supplier", lambda f: f["sku"]["supplier"]),
-    ("€ at stake", lambda f: f"{eur(f['value'])} ({f['value_label']})"),
-]
+# --- 6. method text ----------------------------------------------------------------
+def build_method(skus, comps, cells, S, L, recs):
+    inactive = [s for s in skus if not s["active"]]
+    names = Counter(s["name"] for s in skus)
+    off = sum(1 for s in skus if abs(s["rev"] - s["price"] * s["units"]) > 0.05 * max(s["rev"], 1))
+    skunames = {s["name"].lower() for s in skus}
+    relist_ids = [g["sku_id"] for g in L["gaps"] if g["type"] == "sku"]
+    sk = {s["id"]: s for s in skus}
+    p25, med = share(S["sku_share_p25"]), share(S["sku_share_median"])
+    dq = [
+        f"{len(inactive)} SKUs are marked inaktiv but together sold {eur(sum(s['rev'] for s in inactive))} in 12 weeks "
+        f"({sum(s['rev'] for s in inactive) / S['total_rev']:.0%} of category revenue); "
+        f"{sum(s['stock'] == 'in_stock' for s in inactive)} of them are in stock. "
+        "Confirm what inaktiv means (delisted, sell-through, or stale flag) before acting on status.",
+        f"For {off} of {len(skus)} SKUs, revenue differs by more than 5% from list price × units. "
+        "Treated as promotions/price changes during the period; price_eur is used as current shelf price.",
+        f"{sum(1 for n in names.values() if n > 1)} product names appear on two SKU IDs (different pack or subcategory), "
+        "and some subcategory labels contradict the product name. Rules therefore key on product_id, never on name.",
+        f"{sum(1 for c in comps if not 0 <= c['score'] <= 100)} competitor signal scores fall outside the documented 0–100 range; "
+        "scores are only used for ordering and thresholds, not arithmetic beyond cell averages.",
+        f"Competitor signals are one snapshot ({comps[0]['observed']}) from {len({c['source'] for c in comps})} sources "
+        f"of differing quality (retailer listings vs. search/social). Only {sum(1 for c in comps if c['name'].lower() in skunames)} "
+        "competitor rows are an exact product match to our assortment, so like-for-like price comparison is limited to those.",
+    ]
+    if {"HC0007", "HC0003"} <= set(relist_ids):
+        a, b = sk["HC0007"], sk["HC0003"]
+        dq.append(f"Why were HC0007 and HC0003 delisted? Their markets are {eur(a['mkt_rev'])} and {eur(b['mkt_rev'])} "
+                  f"growing {pct(a['mk_trend'])} and {pct(b['mk_trend'])}, yet channel sales are {eur(a['rev'])} and {eur(b['rev'])}. "
+                  "Was it a supplier, margin or space decision, and does it still hold?")
+    rules = [
+        {"page": "Assortment", "name": "Assortment gap cell", "text":
+            f"A subcategory × shade cell with at least one hot competitor product (signal score ≥ {T['comp_popular_score']} and trend ≥ {pct(T['comp_rising_trend'])}) "
+            f"and at most {plural(T['gap_max_coverage'], 'active in-stock SKU')} of our own."},
+        {"page": "Assortment", "name": "Relist SKU", "text":
+            f"An inactive SKU that sells under {share(T['weak_share'], 0)} of its market, in a market of at least {eur(T['min_market_rev'])} growing {pct(T['rising_market'])} or more."},
+        {"page": "Assortment", "name": "Under-performing cell", "text":
+            f"A cell whose share of market revenue is below {T['under_share_ratio']:.0%} of the category share ({share(S['cat_share'])}), "
+            f"in a market of at least {eur(T['min_market_rev'])}."},
+        {"page": "Products", "name": "Not pushed enough", "text":
+            f"An active, not out-of-stock SKU in a market of at least {eur(T['min_market_rev'])} growing {pct(T['positive_market'])} or more, "
+            f"whose fair-share index is {T['under_index']} or lower, or whose channel trend trails the market by {abs(T['trend_gap']) * 100:.0f} points or more."},
+        {"page": "Products", "name": "Low performing", "text":
+            f"An active SKU with revenue below the bottom quartile ({eur(S['rev_p25'])}) where both channel and market trend are {pct(T['declining'])} or worse."},
+        {"page": "Price", "name": "Signal: identical competitor product", "text":
+            f"Our price differs by {T['price_gap_exact']:.0%} or more from the same product name at a competitor (above or below)."},
+        {"page": "Price", "name": "Signal: market average", "text":
+            f"Our price differs by {T['price_gap_market']:.0%} or more from the market average selling price (market revenue ÷ market units)."},
+        {"page": "Price", "name": "Signal: losing ground", "text":
+            f"Market trend is {pct(T['positive_market'])} or more and our channel trend trails it by {abs(T['trend_gap']) * 100:.0f} points or more (suggests price too high)."},
+        {"page": "Price", "name": "Signal: thin margin", "text":
+            f"Active SKU with margin below {share(T['low_margin'], 0)} and revenue in the top quartile (from {eur(S['rev_p75'])}); suggests price too low."},
+        {"page": "Price", "name": "Price tier", "text":
+            "Confirmed when the identical-product signal fires or at least two signals point the same way (all above or all below); otherwise Flag. "
+            "Price vs the competitor cell median is context only: competitor pack sizes are unknown."},
+        {"page": "Availability", "name": "Restock", "text":
+            f"An active SKU that is out of stock, or on low stock in a market growing {pct(T['rising_market'])} or more."},
+    ]
+    prize_bases = [{"q": r["q"], "text": r["basis"]} for r in recs]
+    prize_bases.append({"q": 0, "text": "Prizes are illustrative scenarios for 12 weeks, not forecasts. The four ranges overlap partly and are not additive."})
+    quad = [
+        {"chart": "Assortment: competitor view", "text": f"x = mean competitor signal score of the cell, y = mean competitor trend; splits at {T['comp_popular_score']} and {pct(T['comp_rising_trend'])}; bubble size = number of competitor products."},
+        {"chart": "Assortment: our channel view", "text": "x = channel revenue or units of the cell (log), y = revenue-weighted channel trend; x splits at the median cell, y at 0%."},
+        {"chart": "Products", "text": "x = share of market units (log, split at median) or market trend (split at 0%), y = fair-share index (log, split at 1.0 = fair share of demand); bubble size = shelf share."},
+        {"chart": "Price", "text": "x = price index vs market average or vs competitor cell median (split at 1.0), y = channel trend minus market trend (split at 0)."},
+        {"chart": "Availability", "text": f"x = channel revenue (log, split at median SKU {eur(S['median_sku_rev'])}), y = market trend (split at 0%); colour = stock status."},
+    ]
+    caveats = [
+        "Stock status is a snapshot: there is no on-hand quantity, lead time or lost-sales data.",
+        f"Competitor signals are one snapshot ({comps[0]['observed']}) from mixed sources (retailer rank, search, social); read them as direction, not volume.",
+        "Competitor pack sizes are unknown, so competitor price comparisons are indicative.",
+        "The data is synthetic: the strongest signals sit in a handful of SKUs, so conclusions rest on few items.",
+        "Channel and market 'share' is a ratio of channel revenue to a market-demand proxy, not a true market share.",
+        "Prize figures are illustrative scenarios, not forecasts, and are not additive across questions.",
+    ]
+    return {"rules": rules, "prize_bases": prize_bases, "quadrant_notes": quad, "data_questions": dq, "caveats": caveats}
 
 
-def write_actions_csv(flags):
+def build_quadrants(S, cells):
+    cl = [c for c in cells if c["n_skus"]]
+    return {
+        "assort_comp": {"x_split": T["comp_popular_score"], "y_split": T["comp_rising_trend"],
+                        "tl": "Emerging: rising, less popular", "tr": "Hot: popular and rising",
+                        "bl": "Quiet: less popular, not rising", "br": "Established: popular, not rising"},
+        "assort_client": {"x_split_rev": statistics.median(c["rev"] for c in cl),
+                          "x_split_units": statistics.median(c["units"] for c in cl), "y_split": 0,
+                          "tl": "Growing niches: small and growing", "tr": "Strongholds: large and growing",
+                          "bl": "Weak spots: small and shrinking", "br": "At risk: large but shrinking"},
+        "products": {"x_split_mkt_unit_share": S["median_mkt_unit_share"], "x_split_mk_trend": 0, "y_split": 1,
+                     "tl": "Niche strengths: small demand, we over-index", "tr": "Winners: strong demand, we over-index",
+                     "bl": "Low performers: weak demand, we under-index (delist / mark-down candidates)",
+                     "br": "Under-pushed: demand is there, we under-index"},
+        "price": {"x_split": 1, "y_split": 0,
+                  "tl": "Priced below, keeping pace (room to raise)", "tr": "Priced above, keeping pace",
+                  "bl": "Priced below, losing ground (check execution, not price)",
+                  "br": "Priced above, losing ground (review price)"},
+        "availability": {"x_split": S["median_sku_rev"], "y_split": 0,
+                         "tl": "Restock next: smaller, rising market", "tr": "Restock first: big sellers, rising market",
+                         "bl": "Low priority", "br": "Keep stocked: big sellers, flat or falling market"},
+    }
+
+
+# --- 7. assemble DATA --------------------------------------------------------------
+def build_data(skus, comps):
+    S = sku_metrics(skus, comps)
+    cells = build_cells(skus, comps, S)
+    L = build_lists(skus, cells, S)
+    suppliers = build_suppliers(skus)
+    brands = build_brands(skus, S)
+    recs = build_recs(skus, cells, suppliers, L, S)
+    cl = [c for c in cells if c["n_skus"]]
+    n_oos = sum(s["active"] and s["stock"] == "out_of_stock" for s in skus)
+    meta = {
+        "client": "ZenBeauty Retail", "category": "Beauty > Hair Coloration", "period_weeks": 12,
+        "generated": GENERATED, "observed_date": comps[0]["observed"],
+        "n_skus": len(skus), "n_active": sum(s["active"] for s in skus), "n_inactive": sum(not s["active"] for s in skus),
+        "n_comps": len(comps), "n_cells_client": len(cl), "n_cells_comp": len({c["cell"] for c in comps}),
+        "total_rev": S["total_rev"], "total_units": S["total_units"], "total_mkt_rev": S["total_mkt_rev"],
+        "total_mkt_units": S["total_mkt_units"], "total_shelf_cm": S["total_shelf_cm"], "cat_share": S["cat_share"],
+        "weighted_margin": S["weighted_margin"], "n_active_oos": n_oos,
+        "sku_share_p25": S["sku_share_p25"], "sku_share_median": S["sku_share_median"],
+        "median_margin": S["median_margin"], "rev_p25": S["rev_p25"], "rev_p75": S["rev_p75"],
+        "median_mkt_unit_share": S["median_mkt_unit_share"], "median_sku_rev": S["median_sku_rev"],
+        "median_cell_rev": statistics.median(c["rev"] for c in cl), "median_cell_units": statistics.median(c["units"] for c in cl),
+    }
+    kpis = [
+        {"label": f"SKUs ({meta['n_active']} active)", "value": meta["n_skus"], "fmt": "int"},
+        {"label": "Channel revenue, 12 weeks", "value": round(S["total_rev"], 2), "fmt": "eur"},
+        {"label": "Share of market revenue", "value": round(S["cat_share"], 6), "fmt": "pct"},
+        {"label": "Revenue-weighted margin", "value": round(S["weighted_margin"], 6), "fmt": "pct"},
+        {"label": "Active SKUs out of stock", "value": n_oos, "fmt": "int"},
+    ]
+    return {
+        "meta": meta,
+        "thresholds": [{"key": k, "value": v, "unit": TM[k][1], "label": TM[k][0], "used_in": TM[k][2]} for k, v in T.items()],
+        "rec_sort": REC_SORT, "kpis": kpis, "skus": skus, "comps": comps, "cells": cells, "brands": brands,
+        "suppliers": suppliers, "lists": L, "recs": recs, "quadrants": build_quadrants(S, cells),
+        "method": build_method(skus, comps, cells, S, L, recs),
+    }
+
+
+def clean(v, key=None):
+    """Round money to 2 dp and fractions to 6 dp; never emit NaN/Infinity."""
+    if isinstance(v, float):
+        if v != v or v in (float("inf"), float("-inf")):
+            return None
+        return round(v, 2 if key in MONEY_KEYS else 6)
+    if isinstance(v, dict):
+        return {k: clean(x, k) for k, x in v.items()}
+    if isinstance(v, list):
+        return [clean(x, key) for x in v]
+    return v
+
+
+# --- 8. writers --------------------------------------------------------------------
+def prize_text(r):
+    return f"{eur(r['prize_low'])}–{eur(r['prize_high'])} per 12 weeks ({r['prize_unit']}, illustrative)"
+
+
+def md_table(headers, rows):
+    esc = lambda x: str(x).replace("|", "/").replace("\n", " ")
+    return ["| " + " | ".join(headers) + " |", "|" + "---|" * len(headers)] + \
+           ["| " + " | ".join(esc(c) for c in r) + " |" for r in rows] + [""]
+
+
+def write_markdown(D):
+    sk = {s["id"]: s for s in D["skus"]}
+    L, M = D["lists"], D["method"]
+    recs = sorted(D["recs"], key=lambda r: -r["prize_high"]) if REC_SORT == "prize" else D["recs"]
+    out = ["# Category opportunity review: Hair Coloration", "",
+           f"Generated by `review.py` from the files in `data/` ({D['meta']['n_skus']} SKUs, {D['meta']['n_comps']} competitor signals, "
+           f"competitor snapshot {D['meta']['observed_date']}). Every number is computed from those files.", "", "## Recommendations", ""]
+    for r in recs:
+        out += [f"### Q{r['q']} · {r['question']}", "", f"**{r['action']}**", "", r["evidence"] + ".", "",
+                f"- Prize: {prize_text(r)}", f"- Basis: {r['basis']}", f"- Owner: {r['owner']}", ""]
+
+    def sku_rows(items, extra=lambda x: []):
+        return [[x["id"], sk[x["id"]]["name"], f"{sk[x['id']]['status']} / {stock_label(sk[x['id']]['stock'])}", x.get("reason", "")] + extra(x)
+                for x in items]
+
+    def prize_cell(x):
+        return [f"{eur(x['prize_low'])}–{eur(x['prize_high'])}"]
+
+    out += ["## Q1 · Assortment", "", "### Assortment gap cells", ""]
+    out += md_table(["Cell", "Reason", "Competitor products"],
+                    [[g["key"].replace("|", " · "), g["reason"], ", ".join(g["comp_ids"])] for g in L["gaps"] if g["type"] == "cell"])
+    out += ["### SKUs to relist", ""]
+    relist = [dict(g, id=g["sku_id"]) for g in L["gaps"] if g["type"] == "sku"]
+    out += md_table(["ID", "Product", "Status / stock", "Reason", "Prize"], sku_rows(relist, prize_cell))
+    out += ["### Under-performing cells", ""]
+    out += md_table(["Cell", "Reason", "Prize (high)"],
+                    [[u["key"].replace("|", " · "), u["reason"], eur(u["prize_high"])] for u in L["under_cells"]])
+    out += ["## Q2 · Products", "", "### Not pushed enough", ""]
+    out += md_table(["ID", "Product", "Status / stock", "Reason", "Prize"], sku_rows(L["not_pushed"], prize_cell))
+    out += ["### Low performing", ""]
+    out += md_table(["ID", "Product", "Status / stock", "Reason"], sku_rows(L["low_perf"]))
+    out += ["## Q3 · Price", ""]
+    out += md_table(["ID", "Product", "Status / stock", "Tier", "Signals", "Margin prize"],
+                    [[p["id"], sk[p["id"]]["name"], f"{sk[p['id']]['status']} / {stock_label(sk[p['id']]['stock'])}", p["tier"],
+                      "; ".join(f"{x['label']} ({x['detail']})" for x in p["signals"]), f"{eur(p['prize_low'])}–{eur(p['prize_high'])}"]
+                     for p in L["price_review"]])
+    out += ["## Q4 · Availability", ""]
+    out += md_table(["ID", "Product", "Status / stock", "Reason", "Prize"], sku_rows(L["restock"], prize_cell))
+    out += md_table(["Supplier", "Active SKUs", "Out of stock", "Low stock", "Revenue exposed"],
+                    [[s["name"], s["n_active"], s["n_oos"], s["n_low"], eur(s["rev_exposed"])] for s in D["suppliers"][:6]])
+    out += ["## Thresholds", ""]
+    out += md_table(["Key", "Value", "Meaning"], [[t["key"], t["value"], t["label"]] for t in D["thresholds"]])
+    out += ["## Rules", ""] + [f"- **{r['page']}: {r['name']}.** {r['text']}" for r in M["rules"]]
+    out += ["", "## Size-of-prize bases", ""] + [f"- {'Q' + str(p['q']) if p['q'] else 'General'}: {p['text']}" for p in M["prize_bases"]]
+    out += ["", "## Data questions to confirm with the customer", ""] + [f"- {q}" for q in M["data_questions"]]
+    out += ["", "## Caveats", ""] + [f"- {c}" for c in M["caveats"]] + [""]
+    (OUT / "recommendations.md").write_text("\n".join(out), encoding="utf-8")
+
+
+def write_actions_csv(D):
+    sk = {s["id"]: s for s in D["skus"]}
+    ck = {c["key"]: c for c in D["cells"]}
+    L = D["lists"]
+    cols = ["question", "list", "tier", "product_id", "cell", "product_name", "brand", "subcategory", "shade_group", "status",
+            "stock_status", "supplier", "price_eur", "channel_revenue_eur_12w", "channel_margin_pct",
+            "channel_sales_trend_12w_pct", "market_revenue_eur_12w", "market_sales_trend_12w_pct", "reason",
+            "prize_low_eur", "prize_high_eur"]
+    rows = []
+
+    def add(q, lst, item, sku_id=None, key=None, tier=""):
+        if sku_id:
+            s = sk[sku_id]
+            vals = [sku_id, s["cell"], s["name"], s["brand"], s["sub"], s["shade"], s["status"], s["stock"], s["supplier"],
+                    s["price"], s["rev"], s["margin"], s["ch_trend"], s["mkt_rev"], s["mk_trend"]]
+        else:
+            c = ck[key]
+            vals = ["", key, "", "", c["sub"], c["shade"], "", "", "", "", c["rev"], "", c["ch_trend"], c["mkt_rev"], c["mk_trend"]]
+        reason = item.get("reason") or "; ".join(f"{x['label']} ({x['detail']})" for x in item.get("signals", []))
+        rows.append([q, lst, tier] + [("" if v is None else v) for v in vals] +
+                    [reason, round(item.get("prize_low", 0), 2) if "prize_high" in item else "",
+                     round(item["prize_high"], 2) if "prize_high" in item else ""])
+
+    for g in L["gaps"]:
+        if g["type"] == "cell":
+            add(1, "gap_cell", g, key=g["key"])
+        else:
+            add(1, "relist", g, sku_id=g["sku_id"])
+    for u in L["under_cells"]:
+        add(1, "under_performing_cell", u, key=u["key"])
+    for x in L["not_pushed"]:
+        add(2, "not_pushed", x, sku_id=x["id"])
+    for x in L["low_perf"]:
+        add(2, "low_perf", x, sku_id=x["id"])
+    for x in L["price_review"]:
+        add(3, "price_review", x, sku_id=x["id"], tier=x["tier"])
+    for x in L["restock"]:
+        add(4, "restock", x, sku_id=x["id"])
     with open(OUT / "actions.csv", "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
-        w.writerow(["action", "product_id", "product_name", "brand", "subcategory", "shade_group", "status",
-                    "stock_status", "supplier", "price_eur", "channel_revenue_eur_12w", "channel_margin_pct",
-                    "channel_sales_trend_12w_pct", "market_revenue_eur_12w", "market_sales_trend_12w_pct",
-                    "evidence", "value_eur", "value_basis"])
-        for x in flags:
-            r = x["sku"]
-            w.writerow([x["action"], r["product_id"], r["product_name"], r["brand"], r["subcategory"], r["shade_group"],
-                        r["status"], r["stock_status"], r["supplier"], r["price_eur"], r["rev"], r["margin"],
-                        r["ch_trend"], r["mkt"], r["mk_trend"], x["reason"], round(x["value"]), x["value_label"]])
-
-
-def write_markdown(recs, checks):
-    lines = ["# Category opportunity review: Hair Coloration", "",
-             "Generated by `review.py` from the files in `data/`. Every number below is computed from those files.", ""]
-    for i, rec in enumerate(recs, 1):
-        lines += [f"## {i}. {rec['title']}", "", f"**Action:** {rec['action']} · **Owner:** {rec['owner']}", "",
-                  rec["summary"], "", "| " + " | ".join(h for h, _ in SKU_COLS) + " |", "|" + "---|" * len(SKU_COLS)]
-        lines += ["| " + " | ".join(str(fn(x)) for _, fn in SKU_COLS) + " |" for x in rec["flags"]]
-        if rec.get("comps"):
-            lines += ["", "Rising competitor products in these shades:", ""]
-            lines += [f"- {c['competitor_product_id']} {c['competitor_product_name']} ({c['shade_group']}): €{c['price']:.2f}, "
-                      f"score {c['score']:.0f}, trend {pct(c['trend'])}, {c['source']}" for c in rec["comps"]]
-        lines += ["", f"**Next step:** {rec['next']}", "", f"**Caveat:** {rec['caveat']}", ""]
-    lines += ["## Data questions to confirm with the customer", ""] + [f"- {c}" for c in checks] + [""]
-    (OUT / "recommendations.md").write_text("\n".join(lines), encoding="utf-8")
-
-
-CSS = """
-:root{--bg:#f6f5f1;--card:#fff;--ink:#1d1d1b;--muted:#6b6a65;--line:#e3e1da;--accent:#1f5c4d;--warn:#8a5a00}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
-main{max-width:1100px;margin:0 auto;padding:32px 16px 64px}h1{font-size:28px;margin:0 0 4px}h2{font-size:20px;margin:40px 0 12px}
-h3{font-size:17px;margin:0 0 8px}.sub{color:var(--muted);margin:0 0 24px}
-.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
-.kpi,.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
-.kpi b{display:block;font-size:22px}.kpi span{color:var(--muted);font-size:13px}
-.card{margin-bottom:16px;padding:20px}.tag{display:inline-block;font-size:12px;font-weight:600;color:var(--accent);
-border:1px solid var(--accent);border-radius:99px;padding:1px 10px;margin-bottom:8px}.owner{color:var(--muted);font-size:13px;margin-left:8px}
-.scroll{overflow-x:auto}table{border-collapse:collapse;width:100%;font-size:13px;margin:12px 0}
-th,td{text-align:left;padding:6px 10px;border-bottom:1px solid var(--line);vertical-align:top}th{color:var(--muted);font-weight:600;white-space:nowrap}
-td.n{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}tr.hot td{background:#fdf6e3}
-.next{margin:8px 0 4px}.caveat{color:var(--warn);font-size:13px;margin:0}
-.filters{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}.filters button{font:inherit;font-size:13px;padding:4px 12px;border-radius:99px;
-border:1px solid var(--line);background:var(--card);cursor:pointer}.filters button.on{background:var(--accent);color:#fff;border-color:var(--accent)}
-li{margin-bottom:6px}code{background:#eceae3;padding:0 4px;border-radius:4px}
-"""
-
-JS = """
-document.querySelectorAll('.filters button').forEach(b=>b.onclick=()=>{
-  document.querySelectorAll('.filters button').forEach(x=>x.classList.toggle('on',x===b));
-  document.querySelectorAll('#all tbody tr').forEach(tr=>tr.hidden=b.dataset.a!=='All'&&tr.dataset.a!==b.dataset.a);});
-"""
-
-
-def table(headers, rows, row_attrs=None):
-    e = html.escape
-    head = "".join(f"<th>{e(h)}</th>" for h in headers)
-    body = ""
-    for i, row in enumerate(rows):
-        attrs = row_attrs[i] if row_attrs else ""
-        body += f"<tr {attrs}>" + "".join(
-            f'<td class="n">{e(c[1:])}</td>' if c.startswith("\t") else f"<td>{e(c)}</td>" for c in row) + "</tr>"
-    return f'<div class="scroll"><table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div>'
-
-
-def write_html(recs, flags, shades, cat_share, checks, skus, comps, stats):
-    e = html.escape
-    total_rev, total_mkt = sum(r["rev"] for r in skus), sum(r["mkt"] for r in skus)
-    kpis = [
-        (str(len(skus)), f"SKUs ({sum(r['active'] for r in skus)} active)"),
-        (eur(total_rev), "channel revenue, 12 weeks"),
-        (pct(cat_share, False), "share of market revenue"),
-        (pct(sum(r["rev"] * r["margin"] for r in skus) / total_rev, False), "revenue-weighted margin"),
-        (str(sum(r["active"] and r["stock_status"] == "out_of_stock" for r in skus)), "active SKUs out of stock"),
-        (str(len({f["sku"]["product_id"] for f in flags if f["action"] != "Status check"})), "SKUs with a recommended action"),
-    ]
-    parts = [f"<!doctype html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
-             f"<title>Hair Coloration category review</title><style>{CSS}</style></head><body><main>",
-             "<h1>Hair Coloration: category opportunity review</h1>",
-             f"<p class='sub'>ZenBeauty Retail · last 12 weeks · {len(skus)} SKUs, {len(comps)} competitor/market signals · "
-             "generated by <code>review.py</code> from the provided data</p>",
-             "<div class='kpis'>" + "".join(f"<div class='kpi'><b>{e(v)}</b><span>{e(l)}</span></div>" for v, l in kpis) + "</div>",
-             "<h2>Recommendations</h2>"]
-    for i, rec in enumerate(recs, 1):
-        parts.append(f"<div class='card'><span class='tag'>{e(rec['action'])}</span><span class='owner'>Owner: {e(rec['owner'])}</span>"
-                     f"<h3>{i}. {e(rec['title'])}</h3><p>{e(rec['summary'])}</p>")
-        parts.append(table([h for h, _ in SKU_COLS], [[str(fn(x)) for _, fn in SKU_COLS] for x in rec["flags"]]))
-        if rec.get("comps"):
-            parts.append("<p><b>Rising competitor products in these shades</b></p>")
-            parts.append(table(["ID", "Competitor product", "Shade", "Price", "Signal score", "Trend", "Source"],
-                               [[c["competitor_product_id"], c["competitor_product_name"], c["shade_group"], f"\t€{c['price']:.2f}",
-                                 f"\t{c['score']:.0f}", "\t" + pct(c["trend"]), c["source"]] for c in rec["comps"]]))
-        parts.append(f"<p class='next'><b>Next step:</b> {e(rec['next'])}</p><p class='caveat'>Caveat: {e(rec['caveat'])}</p></div>")
-
-    parts.append("<h2>Shade groups: our performance vs. market and competitor signals</h2>"
-                 "<p class='sub'>Highlighted rows are under-indexed or losing sales while competitor signals rise.</p>")
-    parts.append(table(
-        ["Shade group", "SKUs", "Out of stock", "Channel revenue", "Share of market", "Channel trend", "Market trend",
-         "Competitor signals", "Competitor trend", "Flag"],
-        [[s["shade"], f"\t{s['n']}", f"\t{s['oos']}", "\t" + eur(s["rev"]), "\t" + pct(s["share"], False), "\t" + pct(s["ch_trend"]),
-          "\t" + pct(s["mk_trend"]), f"\t{s['n_comp']}", "\t" + pct(s["comp_trend"]), s["why"]] for s in shades],
-        ["class='hot'" if s["why"] else "" for s in shades]))
-
-    actions = ["All"] + list(dict.fromkeys(f["action"] for f in sorted(flags, key=lambda f: f["action"])))
-    counts = Counter(f["action"] for f in flags)
-    parts.append("<h2>All flagged SKUs</h2><p class='sub'>One row per SKU and action, sorted by € at stake. Also in <code>output/actions.csv</code>.</p>"
-                 "<div class='filters'>" + "".join(
-                     f"<button data-a='{e(a)}' class='{'on' if a == 'All' else ''}'>{e(a)} ({len(flags) if a == 'All' else counts[a]})</button>"
-                     for a in actions) + "</div>")
-    parts.append(table(["Action"] + [h for h, _ in SKU_COLS],
-                       [[f["action"]] + [str(fn(f)) for _, fn in SKU_COLS] for f in flags],
-                       [f"data-a='{e(f['action'])}'" for f in flags]).replace("<table>", "<table id='all'>"))
-
-    parts.append("<h2>Data questions to confirm with the customer</h2><ul>" +
-                 "".join(f"<li>{e(c).replace('`', '')}</li>" for c in checks) + "</ul>")
-    parts.append("<h2>How SKUs are flagged</h2><ul>"
-                 f"<li><b>Fix availability:</b> active and out of stock; or active, low stock and market trend ≥ {pct(T['rising_market'])}.</li>"
-                 f"<li><b>Promote / fix execution:</b> active, not out of stock, market ≥ {eur(T['min_market_rev'])} and growing ≥ {pct(T['positive_market'])}, "
-                 f"and either channel share &lt; {T['weak_share']:.0%} or channel trend trails market trend by ≥ {abs(T['trend_gap']) * 100:.0f} points.</li>"
-                 f"<li><b>Price review:</b> exact product match at a competitor with a price gap ≥ {T['price_gap']:.0%}; or active, margin &lt; {T['low_margin']:.0%} and top-quartile revenue (≥ {eur(stats['rev_p75'])}).</li>"
-                 f"<li><b>Relist / assortment gap:</b> inactive, channel share &lt; {T['weak_share']:.0%}, market ≥ {eur(T['min_market_rev'])} and growing ≥ {pct(T['rising_market'])}.</li>"
-                 f"<li><b>Delist / mark down:</b> active, bottom-quartile revenue (&lt; {eur(stats['rev_p25'])}), channel and market trend both ≤ {pct(T['declining'])}.</li>"
-                 f"<li><b>Status check:</b> inactive but revenue ≥ {eur(stats['rev_p25'])}.</li>"
-                 f"<li><b>Upside at median share:</b> market revenue × median SKU share ({pct(stats['med_share'], False)}) − current revenue. Illustrative, not a forecast.</li></ul>")
-    parts.append(f"<script>{JS}</script></main></body></html>")
-    (OUT / "category_review.html").write_text("".join(parts), encoding="utf-8")
+        w.writerow(cols)
+        w.writerows(rows)
+    return len(rows)
 
 
 def main():
-    OUT.mkdir(exist_ok=True)
     skus, comps = load()
-    flags, stats = build_flags(skus, comps)
-    shades, cat_share = shade_table(skus, comps)
-    checks = data_checks(skus, comps)
-    recs = build_recommendations(flags, shades, skus, comps, stats)
-    write_actions_csv(flags)
-    write_markdown(recs, checks)
-    write_html(recs, flags, shades, cat_share, checks, skus, comps, stats)
-    print(f"{len(skus)} SKUs, {len(comps)} competitor signals -> {len(flags)} flags")
-    for a, n in Counter(f["action"] for f in flags).most_common():
-        print(f"  {a:26} {n}")
-    print(f"Wrote {OUT / 'category_review.html'}")
+    D = clean(build_data(skus, comps))
+    OUT.mkdir(exist_ok=True)
+    if (ROOT / "web").is_dir():
+        shutil.copytree(ROOT / "web", OUT, dirs_exist_ok=True)
+    else:
+        print("Note: web/ not found yet; skipping site copy.")
+    (OUT / "assets").mkdir(exist_ok=True)
+    (OUT / "assets" / "data.js").write_text(
+        "window.DATA = " + json.dumps(D, ensure_ascii=False, separators=(",", ":")) + ";\n", encoding="utf-8")
+    old = OUT / "category_review.html"
+    if old.exists():
+        old.unlink()
+    write_markdown(D)
+    n_rows = write_actions_csv(D)
+
+    L = D["lists"]
+    print(f"{len(D['skus'])} SKUs, {len(D['comps'])} competitor signals, {len(D['cells'])} cells")
+    print("List counts: " + ", ".join(f"{k}={len(v)}" for k, v in L.items()))
+    for r in D["recs"]:
+        print(f"Q{r['q']} {r['action']}\n    {r['evidence']}\n    {prize_text(r)}")
+    print(f"Wrote {OUT / 'assets' / 'data.js'}, {OUT / 'recommendations.md'}, {OUT / 'actions.csv'} ({n_rows} rows)")
 
 
 if __name__ == "__main__":
