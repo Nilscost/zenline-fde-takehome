@@ -4,7 +4,8 @@ A category opportunity review for ZenBeauty's hair coloration range, as an offli
 
 ## Open and rebuild
 
-- **Open:** `output/index.html` in any browser. No server or network needed.
+- **Live:** https://nilscost.github.io/zenline-fde-takehome/ (rebuilt from the data on every push).
+- **Open locally:** `output/index.html` in any browser. No server or network needed.
 - **Rebuild:** `python3 review.py` (Python 3.9+, standard library only). It reads the CSVs in `data/` and regenerates `output/`.
 
 ## The four questions
