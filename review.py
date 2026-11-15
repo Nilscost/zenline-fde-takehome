@@ -23,19 +23,24 @@ GENERATED = "2026-11-15"
 
 # --- Business thresholds: every list and prize traces back to these numbers. ---
 T = {
-    "min_market_rev": 25_000,     # ignore SKUs/cells whose 12-week market revenue is smaller (EUR)
+    "min_market_rev": 25_000,     # ignore SKUs/groups whose 12-week market revenue is smaller (EUR)
     "positive_market": 0.10,      # market trend that counts as positive
     "rising_market": 0.20,        # market trend that counts as clearly rising
     "declining": -0.15,           # trend that counts as declining (channel and market)
     "comp_popular_score": 50,     # competitor signal score that counts as popular (0-100)
     "comp_rising_trend": 0.15,    # competitor trend that counts as rising
-    "gap_max_coverage": 1,        # a cell with at most this many active, in-stock SKUs has thin coverage
-    "under_share_ratio": 0.60,    # cell share below this fraction of category share = under-performing
+    "gap_max_coverage": 2,        # a hot group with 1..this many active, in-stock SKUs is thinly covered ("expand")
+    "under_share_ratio": 0.60,    # group share below this fraction of category share = under-performing
     "weak_share": 0.01,           # channel/market revenue share that counts as "not selling"
     "under_index": 0.25,          # fair-share index at or below this = under-indexed vs market demand
     "trend_gap": -0.30,           # channel trend minus market trend: losing ground vs the market
+    "push_high_mkt_rev": 100_000, # push, high tier: market at least this large (EUR, 12 weeks)
+    "push_high_index": 0.75,      # push, high tier: fair-share index at or below this (strongly under-indexed)
     "price_gap_exact": 0.15,      # price gap vs the identical product at a competitor
-    "price_gap_market": 0.20,     # price gap vs the market average selling price
+    "price_idx_below": 0.90,      # price index (our price / market avg selling price) at or below = below market
+    "price_idx_above": 1.20,      # price index at or above = above market
+    "elasticity_low": -1.0,       # assumed price elasticity of demand, less elastic case
+    "elasticity_high": -2.0,      # assumed price elasticity of demand, more elastic case
     "low_margin": 0.25,           # margin that counts as thin
     "prize_low_recovery": 0.5,    # prize, low case: share of the revenue/margin at stake that is recovered
     "prize_high_recovery": 1.0,   # prize, high case: share of the revenue/margin at stake that is recovered
@@ -45,17 +50,22 @@ T = {
 TM = {
     "min_market_rev": ("Smallest 12-week market worth acting on", "eur", ["Assortment", "Products"]),
     "positive_market": ("Market trend that counts as positive", "pct", ["Products", "Price"]),
-    "rising_market": ("Market trend that counts as clearly rising", "pct", ["Assortment", "Availability"]),
-    "declining": ("Trend that counts as declining (channel and market)", "pct", ["Products"]),
+    "rising_market": ("Market trend that counts as clearly rising (relist, push high tier, restock)", "pct", ["Assortment", "Products", "Availability"]),
+    "declining": ("Trend that counts as declining (low-performer high tier: channel and market)", "pct", ["Products"]),
     "comp_popular_score": ("Competitor signal score that counts as popular", "score", ["Assortment"]),
     "comp_rising_trend": ("Competitor trend that counts as rising", "pct", ["Assortment"]),
-    "gap_max_coverage": ("Active, in-stock SKUs at or below which a cell has thin coverage", "count", ["Assortment"]),
-    "under_share_ratio": ("Cell share below this fraction of category share = under-performing", "ratio", ["Assortment"]),
+    "gap_max_coverage": ("Hot subcategory × shade group with 1 to this many active, in-stock products = expand", "count", ["Assortment"]),
+    "under_share_ratio": ("Group share below this fraction of category share = under-performing", "ratio", ["Assortment"]),
     "weak_share": ("Revenue share of market that counts as not selling", "pct", ["Assortment", "Products"]),
     "under_index": ("Fair-share index at or below which a SKU is under-indexed", "ratio", ["Products"]),
     "trend_gap": ("Channel trend minus market trend that counts as losing ground", "pct", ["Products", "Price"]),
+    "push_high_mkt_rev": ("Push, high tier: smallest 12-week market", "eur", ["Products"]),
+    "push_high_index": ("Push, high tier: fair-share index at or below", "ratio", ["Products"]),
     "price_gap_exact": ("Price gap vs the identical competitor product", "pct", ["Price"]),
-    "price_gap_market": ("Price gap vs the market average selling price", "pct", ["Price"]),
+    "price_idx_below": ("Price index (our price ÷ market average selling price) at or below = below market", "ratio", ["Price"]),
+    "price_idx_above": ("Price index (our price ÷ market average selling price) at or above = above market", "ratio", ["Price"]),
+    "elasticity_low": ("Assumed price elasticity of demand, less elastic case (assumption, not measured)", "ratio", ["Price"]),
+    "elasticity_high": ("Assumed price elasticity of demand, more elastic case (assumption, not measured)", "ratio", ["Price"]),
     "low_margin": ("Margin that counts as thin", "pct", ["Price"]),
     "prize_low_recovery": ("Prize, low case: share of the amount at stake that is recovered", "ratio", ["Recommendations"]),
     "prize_high_recovery": ("Prize, high case: share of the amount at stake that is recovered", "ratio", ["Recommendations"]),
@@ -63,7 +73,9 @@ TM = {
 }
 REC_SORT = "question"  # "prize" = largest high-end prize first; "question" = question order 1-4
 
-MONEY_KEYS = {"price", "rev", "mkt_rev", "mkt_asp", "target_price", "cost_proxy", "revenue_change_at_target", "gross_profit_change_at_target", "low", "high", "prize_low", "prize_high", "total_rev", "total_mkt_rev",
+MONEY_KEYS = {"price", "rev", "mkt_rev", "mkt_asp", "target_price", "cost_proxy", "revenue_change_at_target", "gross_profit_change_at_target",
+              "revenue_change_low", "revenue_change_high", "gp_change_low", "gp_change_high", "units_at_target_low",
+              "units_at_target_high", "price_gp_low", "price_gp_high", "shelf_cm_needed", "low", "high", "prize_low", "prize_high", "total_rev", "total_mkt_rev",
               "comp_price", "client_price_median", "comp_price_median", "rev_in", "rev_low", "rev_oos",
               "rev_exposed", "median_sku_rev", "rev_p25", "rev_p75", "median_cell_rev", "x_split_rev"}
 
@@ -89,6 +101,10 @@ def share(x, dp=1):
 
 def div(a, b):
     return a / b if b else None
+
+
+def group_label(key):
+    return key.replace("|", " · ")
 
 
 def plural(n, word, many=None):
@@ -229,17 +245,30 @@ def build_cells(skus, comps, S):
                              if cell["ch_trend"] is not None and cell["mk_trend"] is not None else None)
         cell["price_idx_comp"] = div(cell["client_price_median"], cell["comp_price_median"]) \
             if cell["client_price_median"] and cell["comp_price_median"] else None
-        cell["gap"] = (cell["n_skus"] == 0 and cell["comp_score_mean"] is not None
-                       and cell["comp_score_mean"] >= T["comp_popular_score"]
-                       and cell["comp_trend_mean"] >= T["comp_rising_trend"])
-        hot_txt = f"{plural(cell['n_hot'], 'hot competitor product')} (popular and rising)"
-        if not cell["gap"]:
-            cell["gap_reason"] = ""
-        elif cell["n_skus"] == 0:
-            cell["gap_reason"] = f"{hot_txt}; we list no SKU in this cell"
+        cell["label"] = group_label(key)
+        # "hot" = the group sits in the top-right of the competitor view (mean score and mean trend above the splits).
+        cell["hot"] = bool(cell["comp_score_mean"] is not None and cell["comp_score_mean"] >= T["comp_popular_score"]
+                           and cell["comp_trend_mean"] >= T["comp_rising_trend"])
+        if cell["hot"] and cell["n_skus"] == 0:
+            cell["priority"] = "add"
+        elif cell["hot"] and cell["coverage"] <= T["gap_max_coverage"]:
+            cell["priority"] = "expand"
         else:
-            cell["gap_reason"] = (f"{hot_txt}; only {plural(cell['coverage'], 'active, available SKU')} "
-                                  f"of our {cell['n_skus']} in the cell")
+            cell["priority"] = None
+        cell["gap"] = cell["priority"] == "add"
+        hot_txt = f"{plural(cell['n_hot'], 'hot competitor product')} (popular and rising)"
+        if cell["priority"] == "add":
+            cell["priority_reason"] = (f"Competitors are popular and rising here (mean score {cell['comp_score_mean']:.0f}, "
+                                       f"trend {pct(cell['comp_trend_mean'])}) and we list no product in this group.")
+            cell["gap_reason"] = f"{hot_txt}; we list no product in this subcategory × shade group"
+        elif cell["priority"] == "expand":
+            cell["priority_reason"] = (f"Competitors are popular and rising here (mean score {cell['comp_score_mean']:.0f}, "
+                                       f"trend {pct(cell['comp_trend_mean'])}) but only {plural(cell['coverage'], 'active, in-stock product')} of ours cover it.")
+            cell["gap_reason"] = (f"{hot_txt}; only {plural(cell['coverage'], 'active, in-stock product')} "
+                                  f"of our {cell['n_skus']} in the group")
+        else:
+            cell["priority_reason"] = ""
+            cell["gap_reason"] = ""
         cell["under"] = bool(cell["share"] is not None and cell["share"] < T["under_share_ratio"] * S["cat_share"]
                              and mkt_rev >= T["min_market_rev"])
         cell["under_reason"] = (f"Share {share(cell['share'])} of a {eur(mkt_rev)} market vs {share(S['cat_share'])} for the "
@@ -247,14 +276,22 @@ def build_cells(skus, comps, S):
         cells.append(cell)
     peers = [c for c in cells if c["n_skus"] and c["n_comp"]]
     for c in cells:
-        if not c["gap"]:
+        if not c["priority"]:
             continue
-        ranked = sorted(peers, key=lambda p: (abs(p["comp_score_mean"] - c["comp_score_mean"]) / 100
-                          + abs(p["comp_trend_mean"] - c["comp_trend_mean"]), p["key"]))[:3]
-        c.update(peer_keys=[p["key"] for p in ranked], peer_sku_ids=[i for p in ranked for i in p["sku_ids"]],
-                 peer_n=len(ranked), prize_low=min((p["rev"] for p in ranked), default=0),
-                 prize_high=max((p["rev"] for p in ranked), default=0),
-                 peer_basis="Nearest three represented competitor cells by |score difference|/100 + |trend difference|; min–max observed 12-week cell revenue. Sparse, cross-subcategory analogues; signals are not sales forecasts.")
+        ranked = sorted((p for p in peers if p["key"] != c["key"]),
+                        key=lambda p: (abs(p["comp_score_mean"] - c["comp_score_mean"]) / 100
+                                       + abs(p["comp_trend_mean"] - c["comp_trend_mean"]), p["key"]))[:3]
+        # The estimate is the revenue of the products added, not of a whole peer group:
+        # peer revenue per active product × products suggested (hot competitor products, at least 1).
+        n_sug = max(c["n_hot"], 1)
+        per = [p["rev"] / max(p["n_active"], 1) for p in ranked]
+        lo, hi = n_sug * min(per, default=0), n_sug * max(per, default=0)
+        basis = ("Nearest three represented subcategory × shade groups by |score difference|/100 + |trend difference|; "
+                 f"min–max peer 12-week revenue per active product × {plural(n_sug, 'product')} suggested. "
+                 "Sparse, cross-subcategory analogues; signals are not sales forecasts.")
+        c.update(peer_keys=[p["key"] for p in ranked], peer_labels=[p["label"] for p in ranked],
+                 peer_sku_ids=[i for p in ranked for i in p["sku_ids"]],
+                 peer_n=len(ranked), prize_low=lo, prize_high=hi, peer_basis=basis)
     return cells
 
 
@@ -304,17 +341,55 @@ def build_suppliers(skus):
 def price_signals(s, S):
     """Return [(signal, direction)] for one SKU; direction is "above" or "below"."""
     sig = []
-    if s["price_idx_mkt"] is not None and abs(s["price_idx_mkt"] - 1) >= T["price_gap_market"]:
-        d = "above" if s["price_idx_mkt"] > 1 else "below"
-        sig.append(({"code": "market", "label": f"Priced {d} the SKU market unit-price proxy",
-                     "detail": f"€{s['price']:.2f} vs realized market revenue/units €{s['mkt_asp']:.2f}, {pct(s['price_idx_mkt'] - 1)}; not observed shelf price"}, d))
+    idx = s["price_idx_mkt"]
+    if idx is not None and (idx <= T["price_idx_below"] or idx >= T["price_idx_above"]):
+        d = "above" if idx > 1 else "below"
+        sig.append(({"code": "market", "label": f"Priced {d} the market average selling price",
+                     "detail": f"€{s['price']:.2f} vs market revenue ÷ units €{s['mkt_asp']:.2f}, price index {idx:.2f}; not an observed shelf price"}, d))
     return sig
+
+
+def price_scenario(s):
+    """Move the price to the market average selling price under two assumed elasticities.
+
+    units_at_target = units × (target ÷ price)^elasticity; unit cost proxy = price × (1 − margin);
+    gross-profit change = units_at_target × (target − cost) − units × (price − cost)."""
+    price, target, units = s["price"], s["mkt_asp"], s["units"]
+    cost = price * (1 - s["margin"])
+    out = {"cost_proxy": cost, "margin_at_target": (target - cost) / target}
+    for tag in ("low", "high"):
+        e = T[f"elasticity_{tag}"]
+        u = units * (target / price) ** e
+        out[f"units_at_target_{tag}"] = u
+        out[f"revenue_change_{tag}"] = u * target - units * price
+        out[f"gp_change_{tag}"] = u * (target - cost) - units * (price - cost)
+    return out
+
+
+def shelf_medians(skus):
+    act = [s for s in skus if s["active"]]
+    by_sub = defaultdict(list)
+    for s in act:
+        by_sub[s["sub"]].append(s["shelf_cm"])
+    return {k: statistics.median(v) for k, v in by_sub.items()}, statistics.median(s["shelf_cm"] for s in act)
+
+
+def tier_rank(t):
+    return {"high": 0, "medium": 1}.get(t, 2)
 
 
 def build_lists(skus, cells, S):
     p25, med = S["sku_share_p25"], S["sku_share_median"]
     lo_r, hi_r = T["prize_low_recovery"], T["prize_high_recovery"]
     L = {"gaps": [], "under_cells": [], "not_pushed": [], "low_perf": [], "price_review": [], "restock": []}
+    sub_med, all_med = shelf_medians(skus)
+    # coverage: other active, not out-of-stock SKUs in the same subcategory × shade group
+    avail = Counter(s["cell"] for s in skus if s["active"] and s["stock"] != "out_of_stock")
+    for s in skus:
+        own = s["active"] and s["stock"] != "out_of_stock"
+        s["peers_active"] = avail[s["cell"]] - (1 if own else 0)
+        s["keeps_coverage"] = s["peers_active"] >= 1
+        s["push_tier"], s["low_tier"] = None, None
     gap_skus = []
     for s in skus:
         # Q1 (a) SKU-level gap: delisted, not selling, in a rising market
@@ -322,8 +397,10 @@ def build_lists(skus, cells, S):
                 and s["mk_trend"] >= T["rising_market"]):
             s["lists"].append("relist")
             gap_skus.append({
-                "type": "sku", "key": s["cell"], "sku_id": s["id"],
+                "type": "sku", "priority": "relist", "key": s["cell"], "sku_id": s["id"], "name": s["name"],
                 "reason": f"Inactive with {eur(s['rev'])} sales ({share(s['share'])}) in a {eur(s['mkt_rev'])} market growing {pct(s['mk_trend'])}",
+                "n_skus_suggested": 1, "shelf_cm_needed": float(s["shelf_cm"]),
+                "shelf_basis": f"The product's own recorded shelf space ({s['shelf_cm']} cm)",
                 "prize_low": max(s["mkt_rev"] * p25 - s["rev"], 0.0), "prize_high": max(s["mkt_rev"] * med - s["rev"], 0.0)})
         strong = s["mkt_unit_share"] >= S["median_mkt_unit_share"]
         over = s["fair_index"] >= 1
@@ -332,110 +409,164 @@ def build_lists(skus, cells, S):
         if s["active"] and s["stock"] != "out_of_stock" and s["product_quadrant"] == "under_pushed":
             s["lists"].append("not_pushed")
             tg = s["trend_gap"] <= T["trend_gap"]
+            s["push_tier"] = ("high" if s["mkt_rev"] >= T["push_high_mkt_rev"] and s["mk_trend"] >= T["rising_market"]
+                              and s["fair_index"] <= T["push_high_index"] else "medium")
             L["not_pushed"].append({
-                "id": s["id"],
+                "id": s["id"], "name": s["name"], "tier": s["push_tier"],
                 "reason": f"Above-median market unit demand and fair-share index {s['fair_index']:.2f} below 1; market trend {pct(s['mk_trend'])}; channel sells {eur(s['rev'])} ({share(s['share'])} of market) with trend {pct(s['ch_trend'])}",
                 "prize_low": max(s["mkt_rev"] * p25 - s["rev"], lo_r * s["rev"] if tg else 0.0),
                 "prize_high": max(s["mkt_rev"] * med - s["rev"], hi_r * s["rev"] if tg else 0.0)})
         # Q2 low performing
         if s["active"] and s["product_quadrant"] == "low_performers":
             s["lists"].append("low_perf")
+            s["low_tier"] = ("high" if s["rev"] <= S["rev_p25"] and s["ch_trend"] <= T["declining"]
+                             and s["mk_trend"] <= T["declining"] else "medium")
+            n = s["peers_active"]
             L["low_perf"].append({
-                "id": s["id"],
-                "reason": f"Below-median market unit demand and fair-share index {s['fair_index']:.2f} below 1; {eur(s['rev'])} revenue; review viability before delisting"})
+                "id": s["id"], "name": s["name"], "tier": s["low_tier"], "shelf_cm": s["shelf_cm"],
+                "peers_active": n, "keeps_coverage": s["keeps_coverage"],
+                "coverage_note": (f"{plural(n, 'other active product')} cover{'s' if n == 1 else ''} this group" if n
+                                  else "Last active product in this group: keep or replace"),
+                "reason": f"Below-median market unit demand and fair-share index {s['fair_index']:.2f} below 1; {eur(s['rev'])} revenue; channel trend {pct(s['ch_trend'])}, market trend {pct(s['mk_trend'])}; review viability before delisting"})
         # Q3 price review
         sig = price_signals(s, S)
         if sig:
-            dirs = [d for _, d in sig]
-            codes = [x["code"] for x, _ in sig]
-            story = dirs[0] if len(set(dirs)) == 1 else "mixed"
-            tier = "Large gap" if abs(s["price_idx_mkt"] - 1) >= 2 * T["price_gap_market"] else "Flag"
-            delta = (s["mkt_asp"] - s["price"]) * s["units"]
-            at_stake = max(delta, 0.0) if s["active"] else 0.0
-            s["cost_proxy"] = s["price"] * (1 - s["margin"])
-            s["margin_at_target"] = (s["mkt_asp"] - s["cost_proxy"]) / s["mkt_asp"]
+            direction = sig[0][1]
+            idx = s["price_idx_mkt"]
+            large = idx <= 1 - 2 * (1 - T["price_idx_below"]) or idx >= 1 + 2 * (T["price_idx_above"] - 1)
+            tier = "Large gap" if large else "Flag"
+            sc = price_scenario(s)
+            s.update(cost_proxy=sc["cost_proxy"], margin_at_target=sc["margin_at_target"])
+            ups = [max(sc["gp_change_low"], 0.0), max(sc["gp_change_high"], 0.0)] if s["active"] else [0.0, 0.0]
+            note = ""
+            if not s["active"]:
+                note = "Inactive product: no uplift counted"
+            elif max(ups) == 0:
+                note = (f"No gross-profit uplift at either assumed elasticity ({T['elasticity_low']:g}, {T['elasticity_high']:g}): "
+                        f"moving to €{s['mkt_asp']:.2f} {'raises' if direction == 'below' else 'cuts'} price but loses more than it gains")
             s["lists"].append("price_review")
-            s["price_signals"], s["price_tier"] = codes, tier
-            L["price_review"].append({"id": s["id"], "tier": tier, "story": story, "signals": [x for x, _ in sig], "target_price": s["mkt_asp"],
-                                      "revenue_change_at_target": delta, "margin_at_target": s["margin_at_target"],
-                                      "gross_profit_change_at_target": delta,
-                                      "prize_low": lo_r * at_stake, "prize_high": hi_r * at_stake})
+            s["price_signals"], s["price_tier"] = [x["code"] for x, _ in sig], tier
+            L["price_review"].append({
+                "id": s["id"], "name": s["name"], "tier": tier, "story": direction, "direction": direction,
+                "signals": [x for x, _ in sig], "price": s["price"], "target_price": s["mkt_asp"], "price_idx": idx,
+                "units": s["units"], "elasticity_low": T["elasticity_low"], "elasticity_high": T["elasticity_high"],
+                **{k: sc[k] for k in ("cost_proxy", "margin_at_target", "units_at_target_low", "units_at_target_high",
+                                      "revenue_change_low", "revenue_change_high", "gp_change_low", "gp_change_high")},
+                "revenue_change_at_target": sc["revenue_change_low"], "gross_profit_change_at_target": sc["gp_change_low"],
+                "prize_low": min(ups), "prize_high": max(ups), "uplift_note": note})
         # Q4 restock
         oos = s["active"] and s["stock"] == "out_of_stock"
         low = s["active"] and s["stock"] == "low_stock" and s["mk_trend"] >= T["rising_market"]
         if oos or low:
             s["lists"].append("restock")
             L["restock"].append({
-                "id": s["id"],
+                "id": s["id"], "name": s["name"],
                 "reason": (f"Active but out of stock; {eur(s['rev'])} revenue in 12 weeks, market {pct(s['mk_trend'])}" if oos else
                            f"Low stock while the market grows {pct(s['mk_trend'])}; {eur(s['rev'])} revenue in 12 weeks"),
                 "prize_low": lo_r * s["rev"] if oos else 0.0,
                 "prize_high": hi_r * s["rev"] if oos else T["prize_high_lowstock"] * s["rev"]})
-    # Q1 (b) under-performing cells: prize on the cell's SKUs excluding SKUs counted in other prizes
+    # Q1 (b) under-performing groups: prize on the group's SKUs excluding SKUs counted in other prizes
     counted = {s["id"] for s in skus if set(s["lists"]) & {"relist", "not_pushed", "restock", "price_review"}}
     sk = {s["id"]: s for s in skus}
     for c in cells:
         if c["under"]:
             v = [sk[i] for i in c["sku_ids"] if i not in counted]
             target = T["under_share_ratio"] * S["cat_share"] * sum(s["mkt_rev"] for s in v)
-            L["under_cells"].append({"key": c["key"], "reason": c["under_reason"], "share": c["share"],
+            L["under_cells"].append({"key": c["key"], "name": c["label"], "reason": c["under_reason"], "share": c["share"],
                                      "prize_low": 0.0, "prize_high": max(target - sum(s["rev"] for s in v), 0.0)})
-    gap_cells = [{"type": "cell", "key": c["key"], "reason": c["gap_reason"], "n_hot": c["n_hot"],
-                  "coverage": c["coverage"], "comp_ids": c["comp_ids"],
-                  **{k: c[k] for k in ("prize_low", "prize_high", "peer_keys", "peer_sku_ids", "peer_n", "peer_basis")}}
-                 for c in sorted((c for c in cells if c["gap"]), key=lambda c: -c["n_hot"])]
-    L["gaps"] = gap_cells + sorted(gap_skus, key=lambda g: -g["prize_high"])
+    gap_cells = []
+    for c in cells:
+        if not c["priority"]:
+            continue
+        n_sug = max(c["n_hot"], 1)
+        if c["sub"] in sub_med:
+            m, src = sub_med[c["sub"]], f"median shelf space of our active {c['sub']} products"
+        else:
+            m, src = all_med, "median shelf space of all our active products (none active in this subcategory)"
+        gap_cells.append({
+            "type": "cell", "priority": c["priority"], "key": c["key"], "name": c["label"], "reason": c["gap_reason"],
+            "priority_reason": c["priority_reason"], "n_hot": c["n_hot"], "coverage": c["coverage"], "comp_ids": c["comp_ids"],
+            "n_skus_suggested": n_sug, "shelf_cm_needed": n_sug * m,
+            "shelf_basis": f"{plural(n_sug, 'product')} × {m:g} cm ({src})",
+            **{k: c[k] for k in ("prize_low", "prize_high", "peer_keys", "peer_labels", "peer_sku_ids", "peer_n", "peer_basis")}})
+    L["gaps"] = sorted(gap_cells + gap_skus, key=lambda g: (-g["prize_high"], -g["prize_low"], g["key"]))
     L["under_cells"].sort(key=lambda x: -x["prize_high"])
-    L["not_pushed"].sort(key=lambda x: -x["prize_high"])
-    L["low_perf"].sort(key=lambda x: sk[x["id"]]["rev"])
-    L["price_review"].sort(key=lambda x: (x["tier"] != "Large gap", -x["prize_high"], -sk[x["id"]]["rev"]))
+    L["not_pushed"].sort(key=lambda x: (tier_rank(x["tier"]), -x["prize_high"], x["id"]))
+    L["low_perf"].sort(key=lambda x: (tier_rank(x["tier"]), -x["shelf_cm"], sk[x["id"]]["rev"], x["id"]))
+    L["price_review"].sort(key=lambda x: (-x["prize_high"], -x["prize_low"], -sk[x["id"]]["rev"], x["id"]))
     L["restock"].sort(key=lambda x: -sk[x["id"]]["rev"])
     return L
 
 
+def cell_level_prizes(L):
+    """Group-level prizes (missing/expand groups and under-performing groups); max per group so nothing is counted twice."""
+    out = {}
+    for x in [g for g in L["gaps"] if g["type"] == "cell"] + L["under_cells"]:
+        lo, hi = out.get(x["key"], (0.0, 0.0))
+        out[x["key"]] = (max(lo, x["prize_low"]), max(hi, x["prize_high"]))
+    return out
+
+
 # --- 5. recommendations ------------------------------------------------------------
+def join_names(names):
+    return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+
+
 def build_recs(skus, cells, suppliers, L, S):
     sk = {s["id"]: s for s in skus}
     relist = [g for g in L["gaps"] if g["type"] == "sku"]
-    gap_cells = [g for g in L["gaps"] if g["type"] == "cell"]
+    add = [g for g in L["gaps"] if g["type"] == "cell" and g["priority"] == "add"]
+    expand = [g for g in L["gaps"] if g["type"] == "cell" and g["priority"] == "expand"]
     p25, med = share(S["sku_share_p25"]), share(S["sku_share_median"])
     lo_r, hi_r = T["prize_low_recovery"], T["prize_high_recovery"]
     recs = []
 
     # Q1
     rs = [sk[g["sku_id"]] for g in relist]
-    low = sum(g["prize_low"] for g in relist + gap_cells)
-    high = sum(g["prize_high"] for g in relist + gap_cells) + sum(u["prize_high"] for u in L["under_cells"])
-    ids = " and ".join(s["id"] for s in rs[:3])
-    evidence = (f"{ids} sit in markets worth {eur(sum(s['mkt_rev'] for s in rs))} growing at least {pct(min(s['mk_trend'] for s in rs))}, "
-                f"with {eur(sum(s['rev'] for s in rs))} of channel sales" if rs else
-                f"{plural(len(gap_cells), 'cell')} have hot competitor products but at most {T['gap_max_coverage']} in-stock SKU")
+    cl = cell_level_prizes(L)
+    low = sum(g["prize_low"] for g in relist) + sum(v[0] for v in cl.values())
+    high = sum(g["prize_high"] for g in relist) + sum(v[1] for v in cl.values())
+    under = L["under_cells"]
+    action = f"Relist {plural(len(rs), 'delisted high-demand product')} and add {plural(len(add), 'missing subcategory × shade group')}"
+    if expand:
+        action += f", expand {plural(len(expand), 'thinly covered group')}"
+    action += f" and strengthen {plural(len(under), 'under-performing subcategory × shade group')}"
+    evidence = (f"{join_names([s['name'] for s in rs[:3]])} sit in markets worth {eur(sum(s['mkt_rev'] for s in rs))} growing at least "
+                f"{pct(min(s['mk_trend'] for s in rs))}, with {eur(sum(s['rev'] for s in rs))} of channel sales" if rs else
+                f"{plural(len(add), 'subcategory × shade group')} have hot competitor products but no product of ours")
     recs.append({
-        "q": 1, "action": f"Relist {plural(len(relist), 'delisted high-demand SKU')} and close {plural(len(gap_cells), 'assortment gap')}; "
-                          f"lift {plural(len(L['under_cells']), 'under-performing cell')}",
-        "evidence": evidence, "prize_low": low, "prize_high": high, "prize_unit": "revenue",
-        "basis": "Missing cells: min–max 12-week revenue of the three nearest represented competitor-signal cells (peer IDs in gap rows); sparse analogues, not forecast. " + f"Low: relist SKUs reach the 25th-percentile SKU share ({p25}) of their market. "
-                 f"High: relist SKUs reach the median SKU share ({med}) and under-performing cells lift to {share(T['under_share_ratio'] * S['cat_share'])} share "
-                 f"({T['under_share_ratio']:.0%} of category share {share(S['cat_share'])}), excluding SKUs counted in other recommendations."})
+        "q": 1, "action": action, "evidence": evidence, "prize_low": low, "prize_high": high, "prize_unit": "revenue",
+        "basis": "Missing and thinly covered subcategory × shade groups: min–max 12-week revenue per active product in the three nearest represented groups (by competitor score and trend) × products suggested (sparse analogues, not forecasts). "
+                 f"Relist products: low reaches the 25th-percentile product share ({p25}) of their market, high the median product share ({med}). "
+                 f"Under-performing groups (high case only): lift to {share(T['under_share_ratio'] * S['cat_share'])} share "
+                 f"({T['under_share_ratio']:.0%} of category share {share(S['cat_share'])}), excluding products counted in other recommendations. "
+                 "A group that is both thinly covered and under-performing is counted once (the larger estimate)."})
 
     # Q2
-    np_ = L["not_pushed"]
+    np_, lp = L["not_pushed"], L["low_perf"]
     top = sk[np_[0]["id"]] if np_ else None
+    n_np_hi, n_lp_hi = sum(x["tier"] == "high" for x in np_), sum(x["tier"] == "high" for x in lp)
     recs.append({
-        "q": 2, "action": f"Push {plural(len(np_), 'under-sold SKU')} with above-median market demand and review {plural(len(L['low_perf']), 'low performer')}",
-        "evidence": (f"{top['id']} has a {eur(top['mkt_rev'])} market growing {pct(top['mk_trend'])}, but the channel sells {eur(top['rev'])} "
-                     f"({share(top['share'])} of market) with trend {pct(top['ch_trend'])}" if top else "No SKU meets the not-pushed rule"),
+        "q": 2, "action": f"Push {plural(len(np_), 'under-sold product')} and review {plural(len(lp), 'low performer')}",
+        "evidence": (f"{top['name']} has a {eur(top['mkt_rev'])} market growing {pct(top['mk_trend'])}, but the channel sells {eur(top['rev'])} "
+                     f"({share(top['share'])} of market) with trend {pct(top['ch_trend'])}; {n_np_hi} push and {n_lp_hi} review candidates are high priority"
+                     if top else "No product meets the not-pushed rule"),
         "prize_low": sum(x["prize_low"] for x in np_), "prize_high": sum(x["prize_high"] for x in np_), "prize_unit": "revenue",
-        "basis": f"Low: not-pushed SKUs reach the 25th-percentile SKU share ({p25}) of their market, or keep {lo_r:.0%} of current revenue where the channel trails the market by {abs(T['trend_gap']) * 100:.0f}+ points (the larger). "
-                 f"High: median SKU share ({med}), or {hi_r:.0%} of current revenue where sales are collapsing (the larger). Only flagged SKUs below these scenario targets receive positive prizes; the whole review list is not monetized."})
+        "basis": f"Low: under-sold products reach the 25th-percentile product share ({p25}) of their market, or keep {lo_r:.0%} of current revenue where the channel trails the market by {abs(T['trend_gap']) * 100:.0f}+ points (the larger). "
+                 f"High: median product share ({med}), or {hi_r:.0%} of current revenue where sales are collapsing (the larger). Only products below these targets receive a positive estimate; low performers are not monetised."})
 
     # Q3
     pr = L["price_review"]
-    n_conf = sum(p["tier"] == "Large gap" for p in pr)
-    recs.append({"q": 3, "action": f"Review {len(pr)} SKUs priced outside the market-average range",
-        "evidence": "SKU prices are compared with market revenue divided by market units, a realized unit-price proxy rather than observed shelf prices",
-        "prize_low": sum(p["prize_low"] for p in pr), "prize_high": sum(p["prize_high"] for p in pr), "prize_unit": "revenue",
-        "basis": "50–100% movement toward SKU market unit-price proxy for below-proxy active SKUs, constant units. Above-proxy price cuts show signed revenue impact separately and are not positive opportunities. Cost proxy = current price × (1−reported margin); target margin holds that unit cost constant. Reported margin and current price may cover different periods; validate costs, tax, promotions and elasticity before action."})
+    n_above, n_below = sum(p["direction"] == "above" for p in pr), sum(p["direction"] == "below" for p in pr)
+    n_up = sum(p["prize_high"] > 0 for p in pr)
+    el, eh = T["elasticity_low"], T["elasticity_high"]
+    recs.append({"q": 3, "action": f"Review {plural(len(pr), 'price outlier')} ({n_above} above, {n_below} below market price)",
+        "evidence": f"Prices are compared with the market average selling price (market revenue ÷ market units); {plural(n_up, 'product')} show a gross-profit uplift when moved to it under the assumed elasticities",
+        "prize_low": sum(p["prize_low"] for p in pr), "prize_high": sum(p["prize_high"] for p in pr), "prize_unit": "gross profit",
+        "basis": f"Move each active outlier (price index ≤ {T['price_idx_below']:.2f} or ≥ {T['price_idx_above']:.2f}) to the market average selling price. "
+                 f"Units at target = units × (target ÷ price)^elasticity, with assumed elasticities {el:g} and {eh:g} (assumptions, not measured). "
+                 "Unit cost proxy = price × (1 − reported margin); gross-profit uplift = units at target × (target − cost) − units × (price − cost). "
+                 "Range = smaller and larger positive uplift of the two elasticities; negative uplifts count as zero. Validate costs, promotions and elasticity before acting."})
 
     # Q4
     rl = L["restock"]
@@ -445,14 +576,18 @@ def build_recs(skus, cells, suppliers, L, S):
     sup = suppliers[0]
     exposed = sum(s["rev_exposed"] for s in suppliers)
     recs.append({
-        "q": 4, "action": f"Restock {plural(len(oos), 'out-of-stock SKU')} and {plural(len(lows), 'low-stock SKU')} in rising markets; start with {sup['name']}",
-        "evidence": f"{plural(len(oos), 'active SKU')} out of stock carry {eur(oos_rev)} of 12-week revenue, and {sup['name']} alone accounts for {share(sup['rev_exposed'] / exposed, 0)} of exposed revenue",
+        "q": 4, "action": f"Prioritise replenishment for {plural(len(rl), 'SKU')} ({len(oos)} out of stock, {len(lows)} low stock)",
+        "evidence": f"{plural(len(oos), 'active product')} out of stock carry {eur(oos_rev)} of 12-week revenue, and {sup['name']} alone accounts for {share(sup['rev_exposed'] / exposed, 0)} of exposed revenue",
         "prize_low": lo_r * oos_rev, "prize_high": hi_r * oos_rev + T["prize_high_lowstock"] * low_rev, "prize_unit": "revenue protected",
-        "basis": f"Low: {lo_r:.0%} of the 12-week revenue of {plural(len(oos), 'active out-of-stock SKU')}. High: {hi_r:.0%} of it plus "
-                 f"{T['prize_high_lowstock']:.0%} of the 12-week revenue of {plural(len(lows), 'low-stock SKU')} in markets growing {pct(T['rising_market'])} or more."})
+        "basis": f"Low: {lo_r:.0%} of the 12-week revenue of {plural(len(oos), 'active out-of-stock product')}. High: {hi_r:.0%} of it plus "
+                 f"{T['prize_high_lowstock']:.0%} of the 12-week revenue of {plural(len(lows), 'low-stock product')} in markets growing {pct(T['rising_market'])} or more."})
     for r in recs:
         r.update(page=PAGES[r["q"]], question=QUESTIONS[r["q"]], owner=OWNERS[r["q"]])
-    return recs
+    summary = {"n_relist": len(rs), "n_gap_groups": len(add), "n_expand_groups": len(expand), "n_under_groups": len(under),
+               "n_push": len(np_), "n_push_high": n_np_hi, "n_low": len(lp), "n_low_high": n_lp_hi,
+               "n_price": len(pr), "n_price_above": n_above, "n_price_below": n_below,
+               "n_restock": len(rl), "n_oos": len(oos), "n_low_stock": len(lows)}
+    return recs, summary
 
 
 # --- 6. method text ----------------------------------------------------------------
@@ -474,68 +609,77 @@ def build_method(skus, comps, cells, S, L, recs):
         f"{sum(1 for n in names.values() if n > 1)} product names appear on two SKU IDs (different pack or subcategory), "
         "and some subcategory labels contradict the product name. Rules therefore key on product_id, never on name.",
         f"{sum(1 for c in comps if not 0 <= c['score'] <= 100)} competitor signal scores fall outside the documented 0–100 range; "
-        "scores are only used for ordering and thresholds, not arithmetic beyond cell averages.",
+        "scores are only used for ordering and thresholds, not arithmetic beyond subcategory × shade group averages.",
         f"Competitor signals are one snapshot ({comps[0]['observed']}) from {len({c['source'] for c in comps})} sources "
         f"of differing quality (retailer listings vs. search/social). Only {sum(1 for c in comps if c['name'].lower() in skunames)} "
         "competitor rows are an exact product match to our assortment, so like-for-like price comparison is limited to those.",
     ]
-    if {"HC0007", "HC0003"} <= set(relist_ids):
-        a, b = sk["HC0007"], sk["HC0003"]
-        dq.append(f"Why were HC0007 and HC0003 delisted? Their markets are {eur(a['mkt_rev'])} and {eur(b['mkt_rev'])} "
+    if len(relist_ids) >= 2:
+        a, b = sk[relist_ids[0]], sk[relist_ids[1]]
+        dq.append(f"Why were {a['name']} and {b['name']} delisted? Their markets are {eur(a['mkt_rev'])} and {eur(b['mkt_rev'])} "
                   f"growing {pct(a['mk_trend'])} and {pct(b['mk_trend'])}, yet channel sales are {eur(a['rev'])} and {eur(b['rev'])}. "
                   "Was it a supplier, margin or space decision, and does it still hold?")
+    hot_def = (f"mean competitor signal score ≥ {T['comp_popular_score']} and mean competitor trend ≥ {pct(T['comp_rising_trend'])} "
+               "(top-right of the competitor view)")
+    el, eh = T["elasticity_low"], T["elasticity_high"]
     rules = [
-        {"page": "Assortment", "name": "Assortment gap cell", "text":
-            f"A subcategory × shade cell with at least one hot competitor product (signal score ≥ {T['comp_popular_score']} and trend ≥ {pct(T['comp_rising_trend'])}) "
-            f"and at most {plural(T['gap_max_coverage'], 'active in-stock SKU')} of our own."},
-        {"page": "Assortment", "name": "Relist SKU", "text":
-            f"An inactive SKU that sells under {share(T['weak_share'], 0)} of its market, in a market of at least {eur(T['min_market_rev'])} growing {pct(T['rising_market'])} or more."},
-        {"page": "Assortment", "name": "Under-performing cell", "text":
-            f"A cell whose share of market revenue is below {T['under_share_ratio']:.0%} of the category share ({share(S['cat_share'])}), "
+        {"page": "Assortment", "name": "Add: missing subcategory × shade group", "text":
+            f"A subcategory × shade group where competitors are hot ({hot_def}) and we list no product. "
+            "Estimate: min–max 12-week revenue per active product of the nearest three represented groups by |score difference|/100 + |trend difference|, × products suggested."},
+        {"page": "Assortment", "name": "Expand: thinly covered group", "text":
+            f"A hot group (same definition) where we list products but only 1 to {T['gap_max_coverage']} are active and in stock. "
+            "Estimate: min–max 12-week revenue per active product of the same three nearest peer groups × products suggested."},
+        {"page": "Assortment", "name": "Shelf space needed", "text":
+            "Products suggested = number of hot competitor products in the group (at least 1; 1 for a relist). "
+            "Shelf needed = products suggested × median shelf space of our active products in the same subcategory "
+            "(overall median when none are active there); a relist uses the product's own shelf space."},
+        {"page": "Assortment", "name": "Relist product", "text":
+            f"An inactive product that sells under {share(T['weak_share'], 0)} of its market, in a market of at least {eur(T['min_market_rev'])} growing {pct(T['rising_market'])} or more."},
+        {"page": "Assortment", "name": "Under-performing group", "text":
+            f"A subcategory × shade group whose share of market revenue is below {T['under_share_ratio']:.0%} of the category share ({share(S['cat_share'])}), "
             f"in a market of at least {eur(T['min_market_rev'])}."},
-        {"page": "Products", "name": "Not pushed enough", "text":
-            f"An active, not out-of-stock SKU in a market of at least {eur(T['min_market_rev'])} growing {pct(T['positive_market'])} or more, "
-            f"whose fair-share index is {T['under_index']} or lower, or whose channel trend trails the market by {abs(T['trend_gap']) * 100:.0f} points or more."},
-        {"page": "Products", "name": "Low performing", "text":
-            f"An active SKU with revenue below the bottom quartile ({eur(S['rev_p25'])}) where both channel and market trend are {pct(T['declining'])} or worse."},
-        {"page": "Price", "name": "Signal: identical competitor product", "text":
-            f"Our price differs by {T['price_gap_exact']:.0%} or more from the same product name at a competitor (above or below)."},
-        {"page": "Price", "name": "Signal: market average", "text":
-            f"Our price differs by {T['price_gap_market']:.0%} or more from the market average selling price (market revenue ÷ market units)."},
-        {"page": "Price", "name": "Signal: losing ground", "text":
-            f"Market trend is {pct(T['positive_market'])} or more and our channel trend trails it by {abs(T['trend_gap']) * 100:.0f} points or more (suggests price too high)."},
-        {"page": "Price", "name": "Signal: thin margin", "text":
-            f"Active SKU with margin below {share(T['low_margin'], 0)} and revenue in the top quartile (from {eur(S['rev_p75'])}); suggests price too low."},
-        {"page": "Price", "name": "Price tier", "text":
-            "Large gap when the identical-product signal fires or at least two signals point the same way (all above or all below); otherwise Flag. "
-            "Price vs the competitor cell median is context only: competitor pack sizes are unknown."},
+        {"page": "Products", "name": "Quadrant decision rules", "text":
+            "Market unit demand splits at the median; fair-share index (channel unit share ÷ market unit share) splits at 1. "
+            "Active, available bottom-right products are under-sold (push); active bottom-left products are low performers (review viability)."},
+        {"page": "Products", "name": "Push: high vs medium", "text":
+            f"High: market of at least {eur(T['push_high_mkt_rev'])}, market trend {pct(T['rising_market'])} or more and fair-share index "
+            f"{T['push_high_index']:.2f} or lower. All other under-sold products are medium."},
+        {"page": "Products", "name": "Low performer: high vs medium", "text":
+            f"High: revenue in the bottom quartile (up to {eur(S['rev_p25'])}) with both channel and market trend {pct(T['declining'])} or worse. "
+            "All other low performers are medium."},
+        {"page": "Products", "name": "Low performer coverage", "text":
+            "Counts the other active, not out-of-stock products in the same subcategory × shade group. "
+            "When none remain, removing the product empties the group: keep or replace it rather than delist."},
+        {"page": "Price", "name": "Price outlier", "text":
+            f"Price index = our price ÷ market average selling price (market revenue ÷ market units). Below market at {T['price_idx_below']:.2f} or less, "
+            f"above market at {T['price_idx_above']:.2f} or more. Large gap marks indices at {1 - 2 * (1 - T['price_idx_below']):.2f} or less / "
+            f"{1 + 2 * (T['price_idx_above'] - 1):.2f} or more (magnitude, not confidence). The market average is a realized proxy, not a shelf price."},
+        {"page": "Price", "name": "Elasticity scenario", "text":
+            f"Target price = market average selling price. Units at target = units × (target ÷ price)^elasticity, with assumed elasticities {el:g} and {eh:g} "
+            "(assumptions: no elasticity was measured). Unit cost proxy = price × (1 − reported margin). Gross-profit uplift = units at target × (target − cost) "
+            "− units × (price − cost); revenue change shown alongside. Only positive uplift counts; inactive products count zero."},
         {"page": "Availability", "name": "Restock", "text":
-            f"An active SKU that is out of stock, or on low stock in a market growing {pct(T['rising_market'])} or more."},
-    ]
-    # Rule descriptions use the same boundaries as the visible default product chart.
-    rules = [r for r in rules if r["page"] not in ("Products", "Price") and r["name"] != "Assortment gap cell"]
-    rules += [
-        {"page": "Assortment", "name": "Assortment gap cell", "text": "No customer SKU and mean competitor score ≥50 and mean trend ≥15% (top-right quadrant). Nearest three represented cells by normalized score/trend distance supply the observed revenue range; peer IDs are retained."},
-        {"page": "Products", "name": "Quadrant decision rules", "text": "Market unit demand splits at the median; fair-share index splits at 1. Active available bottom-right SKUs are under-pushed; active bottom-left SKUs are low performers requiring viability review."},
-        {"page": "Price", "name": "Market unit-price extremes", "text": "Absolute price gap ≥20% vs SKU market revenue/units; Large gap labels gaps ≥40%, indicating magnitude rather than causal confidence. Exact competitor matches are context only. This realized proxy is not shelf price."},
-        {"page": "Price", "name": "Constant-unit scenario", "text": "Move current price toward SKU market unit-price proxy holding units and unit-cost proxy constant. Positive revenue uplifts receive 50–100% ranges; signed price-cut impacts and target margins remain separate. No elasticity or cost forecast is available."},
+            f"An active product that is out of stock, or on low stock in a market growing {pct(T['rising_market'])} or more."},
     ]
     prize_bases = [{"q": r["q"], "text": r["basis"]} for r in recs]
-    prize_bases.append({"q": 0, "text": "12-week scenarios, not forecasts. Individual question ranges overlap. The combined total uses the maximum revenue range per SKU across actions, plus missing-cell peer ranges and residual cell opportunities; no gross profit is added."})
+    prize_bases.append({"q": 0, "text": "12-week estimates, not forecasts. Individual question ranges overlap. The combined revenue total takes the largest revenue estimate per product across actions, "
+                                        "plus group-level estimates (missing, thinly covered and under-performing subcategory × shade groups, the larger one per group). "
+                                        "The Q3 price estimate is gross profit and is reported separately, not added."})
     quad = [
-        {"chart": "Assortment: competitor view", "text": f"x = mean competitor signal score of the cell, y = mean competitor trend; splits at {T['comp_popular_score']} and {pct(T['comp_rising_trend'])}; bubble size = number of competitor products."},
-        {"chart": "Assortment: our channel view", "text": "x = channel revenue or units of the cell (log), y = revenue-weighted channel trend; x splits at the median cell, y at 0%."},
-        {"chart": "Products", "text": "x = share of market units (log, split at median SKU demand), y = channel unit share divided by market unit share (log, split at 1.0). Bubble size = shelf share. Inactive and out-of-stock products require separate review before acting."},
-        {"chart": "Price", "text": "x = price index vs SKU realized market unit-price proxy; y = channel revenue (log). Review lines at 0.8 and 1.2 mark ±20% extremes. This is not a quadrant decision chart."},
-        {"chart": "Availability", "text": f"x = channel revenue (log, split at median SKU {eur(S['median_sku_rev'])}), y = market trend (split at 0%); colour = stock status."},
+        {"chart": "Assortment: competitor view", "text": f"x = mean competitor signal score of the subcategory × shade group, y = mean competitor trend; splits at {T['comp_popular_score']} and {pct(T['comp_rising_trend'])}; bubble size = number of competitor products."},
+        {"chart": "Assortment: our channel view", "text": "x = channel revenue or units of the group (log), y = revenue-weighted channel trend; x splits at the median group, y at 0%."},
+        {"chart": "Products", "text": "x = share of market units (log, split at median product demand), y = channel unit share divided by market unit share (log, split at 1.0). Bubble size = shelf share. Inactive and out-of-stock products require separate review before acting."},
+        {"chart": "Price", "text": f"x = price index vs the market average selling price; y = channel revenue (log). Review lines at {T['price_idx_below']:.2f} and {T['price_idx_above']:.2f} mark the outlier thresholds. This is not a quadrant decision chart."},
+        {"chart": "Availability", "text": f"x = channel revenue (log, split at median product {eur(S['median_sku_rev'])}), y = market trend (split at 0%); colour = stock status."},
     ]
     caveats = [
         "Stock status is a snapshot: there is no on-hand quantity, lead time or lost-sales data.",
         f"Competitor signals are one snapshot ({comps[0]['observed']}) from mixed sources (retailer rank, search, social); read them as direction, not volume.",
         "Competitor pack sizes are unknown, so competitor price comparisons are indicative.",
-        "The data is synthetic: the strongest signals sit in a handful of SKUs, so conclusions rest on few items.",
+        f"Price elasticities ({el:g} and {eh:g}) are assumptions; the price estimates show what happens if demand reacts that way, not what will happen.",
+        "The data is synthetic: the strongest signals sit in a handful of products, so conclusions rest on few items.",
         "Channel and market 'share' is a ratio of channel revenue to a market-demand proxy, not a true market share.",
-        "Question ranges overlap. The separately calculated combined total takes the maximum opportunity per SKU; peer-cell estimates assume no cannibalization and may share a small peer sample.",
+        "Question ranges overlap. The separately calculated combined total takes the largest estimate per product; peer-group estimates assume no cannibalization and may share a small peer sample.",
     ]
     return {"rules": rules, "prize_bases": prize_bases, "quadrant_notes": quad, "data_questions": dq, "caveats": caveats}
 
@@ -554,7 +698,7 @@ def build_quadrants(S, cells):
                      "tl": "Niche strengths: small demand, we over-index", "tr": "Winners: strong demand, we over-index",
                      "bl": "Review candidates: weak demand, we under-index",
                      "br": "Under-pushed: demand is there, we under-index"},
-        "price": {"review_low": 0.8, "review_high": 1.2, "description": "SKU market unit-price proxy vs channel revenue; review extremes, no quadrant rules"},
+        "price": {"review_low": T["price_idx_below"], "review_high": T["price_idx_above"], "description": "Price index vs the market average selling price against channel revenue; review outliers, no quadrant rules"},
         "availability": {"x_split": S["median_sku_rev"], "y_split": 0,
                          "tl": "Restock next: smaller, rising market", "tr": "Restock first: big sellers, rising market",
                          "bl": "Low priority", "br": "Keep stocked: big sellers, flat or falling market"},
@@ -568,7 +712,7 @@ def build_data(skus, comps):
     L = build_lists(skus, cells, S)
     suppliers = build_suppliers(skus)
     brands = build_brands(skus, S)
-    recs = build_recs(skus, cells, suppliers, L, S)
+    recs, summary = build_recs(skus, cells, suppliers, L, S)
     cl = [c for c in cells if c["n_skus"]]
     n_oos = sum(s["active"] and s["stock"] == "out_of_stock" for s in skus)
     meta = {
@@ -595,18 +739,37 @@ def build_data(skus, comps):
     for g in L["gaps"]:
         if g["type"] == "sku":
             candidates[g["sku_id"]].append(g)
-    for name in ("not_pushed", "price_review", "restock"):
+    for name in ("not_pushed", "restock"):
         for x in L[name]:
             candidates[x["id"]].append(x)
-    total = {"low": sum(max(x["prize_low"] for x in v) for v in candidates.values()) + sum(g["prize_low"] for g in L["gaps"] if g["type"] == "cell"),
-             "high": sum(max(x["prize_high"] for x in v) for v in candidates.values()) + sum(g["prize_high"] for g in L["gaps"] if g["type"] == "cell") + sum(x["prize_high"] for x in L["under_cells"]),
-             "basis": "12-week scenario, not forecast: highest revenue opportunity/protection per SKU across Q1–Q4, plus disjoint missing-cell peer ranges and residual under-performing cells. Gross profit excluded; assumes complete overlap of actions on the same SKU and no cannibalization across cells."}
+    cl_prizes = cell_level_prizes(L)
+    total = {"low": sum(max(x["prize_low"] for x in v) for v in candidates.values()) + sum(v[0] for v in cl_prizes.values()),
+             "high": sum(max(x["prize_high"] for x in v) for v in candidates.values()) + sum(v[1] for v in cl_prizes.values()),
+             "price_gp_low": sum(p["prize_low"] for p in L["price_review"]),
+             "price_gp_high": sum(p["prize_high"] for p in L["price_review"]),
+             "basis": "Estimated 12-week revenue, not a forecast: the largest revenue estimate per product across relist, push and restock actions, "
+                      "plus group-level estimates for missing, thinly covered and under-performing subcategory × shade groups (the larger one per group). "
+                      "Assumes actions on the same product fully overlap and no cannibalization between groups. "
+                      "The Q3 price estimate is gross profit, not revenue, so it is shown separately and not added."}
     assert all(total[k] >= 0 for k in ("low", "high")) and total["low"] <= total["high"]
-    assert all(g["peer_n"] > 0 and not next(c for c in cells if c["key"] == g["key"])["n_skus"] for g in L["gaps"] if g["type"] == "cell")
+    ck = {c["key"]: c for c in cells}
+    for g in L["gaps"]:
+        if g["type"] == "cell":
+            c = ck[g["key"]]
+            assert g["peer_n"] > 0 and c["hot"] and g["key"] not in g["peer_keys"]
+            assert (c["n_skus"] == 0) if g["priority"] == "add" else (c["n_skus"] > 0 and c["coverage"] <= T["gap_max_coverage"])
+        assert g["shelf_cm_needed"] > 0 and g["n_skus_suggested"] >= 1
+    assert all(p["prize_low"] <= p["prize_high"] and p["prize_low"] >= 0 for p in L["price_review"])
+    assert all((p["price_idx"] <= T["price_idx_below"]) == (p["direction"] == "below") for p in L["price_review"])
+    assert all(x["tier"] in ("high", "medium") for x in L["not_pushed"] + L["low_perf"])
+    assert all(x["keeps_coverage"] == (x["peers_active"] >= 1) for x in L["low_perf"])
+    assert summary["n_price"] == summary["n_price_above"] + summary["n_price_below"]
+    assert summary["n_restock"] == summary["n_oos"] + summary["n_low_stock"]
     return {
         "opportunity_total": total,
+        "summary": summary,
         "meta": meta,
-        "thresholds": [{"key": k, "value": v, "unit": TM[k][1], "label": TM[k][0], "used_in": TM[k][2]} for k, v in T.items() if k not in {"price_gap_exact", "low_margin", "gap_max_coverage", "under_index", "declining", "positive_market"}],
+        "thresholds": [{"key": k, "value": v, "unit": TM[k][1], "label": TM[k][0], "used_in": TM[k][2]} for k, v in T.items() if k not in {"price_gap_exact", "low_margin", "under_index", "positive_market"}],
         "rec_sort": REC_SORT, "kpis": kpis, "skus": skus, "comps": comps, "cells": cells, "brands": brands,
         "suppliers": suppliers, "lists": L, "recs": recs, "quadrants": build_quadrants(S, cells),
         "method": build_method(skus, comps, cells, S, L, recs),
@@ -618,7 +781,7 @@ def clean(v, key=None):
     if isinstance(v, float):
         if v != v or v in (float("inf"), float("-inf")):
             return None
-        return round(v, 2 if key in MONEY_KEYS else 6)
+        return round(v, 2 if key in MONEY_KEYS else 6) + 0.0  # + 0.0 turns -0.0 into 0.0
     if isinstance(v, dict):
         return {k: clean(x, k) for k, x in v.items()}
     if isinstance(v, list):
@@ -628,7 +791,7 @@ def clean(v, key=None):
 
 # --- 8. writers --------------------------------------------------------------------
 def prize_text(r):
-    return f"€{r['prize_low']/1000:,.0f}k–€{r['prize_high']/1000:,.0f}k per 12 weeks ({r['prize_unit']}, illustrative)"
+    return f"€{r['prize_low']/1000:,.0f}k–€{r['prize_high']/1000:,.0f}k per 12 weeks ({r['prize_unit']}, estimated)"
 
 
 def md_table(headers, rows):
@@ -637,51 +800,56 @@ def md_table(headers, rows):
            ["| " + " | ".join(esc(c) for c in r) + " |" for r in rows] + [""]
 
 
+def k(x):
+    return f"€{x/1000:,.0f}k"
+
+
 def write_markdown(D):
     sk = {s["id"]: s for s in D["skus"]}
-    L, M = D["lists"], D["method"]
+    L, M, O = D["lists"], D["method"], D["opportunity_total"]
     recs = sorted(D["recs"], key=lambda r: -r["prize_high"]) if REC_SORT == "prize" else D["recs"]
     out = ["# Category opportunity review: Hair Coloration", "",
            f"Generated by `review.py` from the files in `data/` ({D['meta']['n_skus']} SKUs, {D['meta']['n_comps']} competitor signals, "
            f"competitor snapshot {D['meta']['observed_date']}). Every number is computed from those files.", "", "## Recommendations", ""]
     for r in recs:
         out += [f"### Q{r['q']} · {r['question']}", "", f"**{r['action']}**", "", r["evidence"] + ".", "",
-                f"- Prize: {prize_text(r)}", f"- Basis: {r['basis']}", f"- Owner: {r['owner']}", ""]
+                f"- Estimated prize: {prize_text(r)}", f"- Basis: {r['basis']}", f"- Owner: {r['owner']}", ""]
 
-    def sku_rows(items, extra=lambda x: []):
-        return [[x["id"], sk[x["id"]]["name"], f"{sk[x['id']]['status']} / {stock_label(sk[x['id']]['stock'])}", x.get("reason", "")] + extra(x)
-                for x in items]
+    def st(i):
+        return f"{sk[i]['status']} / {stock_label(sk[i]['stock'])}"
 
-    def prize_cell(x):
-        return [f"€{x['prize_low']/1000:,.0f}k–€{x['prize_high']/1000:,.0f}k"]
+    def rng(x):
+        return f"{k(x['prize_low'])}–{k(x['prize_high'])}"
 
-    out += [f"Combined revenue opportunity/protection: €{D['opportunity_total']['low']/1000:,.0f}k–€{D['opportunity_total']['high']/1000:,.0f}k. {D['opportunity_total']['basis']}", ""]
-    out += ["## Q1 · Assortment", "", "### Assortment gap cells", ""]
-    out += md_table(["Cell", "Reason", "Competitor products", "Peer cells / SKU IDs", "12-week revenue range"],
-                    [[g["key"].replace("|", " · "), g["reason"], ", ".join(g["comp_ids"]), "; ".join(g["peer_keys"]) + " / " + ", ".join(g["peer_sku_ids"]), f"€{g['prize_low']/1000:,.0f}k–€{g['prize_high']/1000:,.0f}k"] for g in L["gaps"] if g["type"] == "cell"])
-    out += ["### SKUs to relist", ""]
-    relist = [dict(g, id=g["sku_id"]) for g in L["gaps"] if g["type"] == "sku"]
-    out += md_table(["ID", "Product", "Status / stock", "Reason", "Prize"], sku_rows(relist, prize_cell))
-    out += ["### Under-performing cells", ""]
-    out += md_table(["Cell", "Reason", "Prize (high)"],
-                    [[u["key"].replace("|", " · "), u["reason"], f"€{u['prize_high']/1000:,.0f}k"] for u in L["under_cells"]])
+    out += [f"Combined estimated revenue opportunity/protection: {k(O['low'])}–{k(O['high'])}; price gross-profit estimate "
+            f"{k(O['price_gp_low'])}–{k(O['price_gp_high'])} shown separately. {O['basis']}", ""]
+    out += ["## Q1 · Assortment", "", "### Assortment priorities (add, expand, relist)", ""]
+    out += md_table(["Priority", "Name", "Reason", "Products suggested", "Shelf needed", "Estimated 12-week revenue", "Basis"],
+                    [[g["priority"], g["name"], g["reason"], g["n_skus_suggested"], f"{g['shelf_cm_needed']:g} cm ({g['shelf_basis']})", rng(g),
+                      (g["peer_basis"] + " Peers: " + "; ".join(g["peer_labels"])) if g["type"] == "cell" else "Relist: market share scenario"]
+                     for g in L["gaps"]])
+    out += ["### Under-performing subcategory × shade groups", ""]
+    out += md_table(["Group", "Reason", "Estimate (high)"], [[u["name"], u["reason"], k(u["prize_high"])] for u in L["under_cells"]])
     out += ["## Q2 · Products", "", "### Not pushed enough", ""]
-    out += md_table(["ID", "Product", "Status / stock", "Reason", "Prize"], sku_rows(L["not_pushed"], prize_cell))
+    out += md_table(["Product", "Tier", "ID", "Status / stock", "Reason", "Estimate"],
+                    [[x["name"], x["tier"], x["id"], st(x["id"]), x["reason"], rng(x)] for x in L["not_pushed"]])
     out += ["### Low performing", ""]
-    out += md_table(["ID", "Product", "Status / stock", "Reason"], sku_rows(L["low_perf"]))
+    out += md_table(["Product", "Tier", "ID", "Status / stock", "Shelf", "Coverage", "Reason"],
+                    [[x["name"], x["tier"], x["id"], st(x["id"]), f"{x['shelf_cm']} cm", x["coverage_note"], x["reason"]] for x in L["low_perf"]])
     out += ["## Q3 · Price", ""]
-    out += md_table(["ID", "Product", "Status / stock", "Tier", "Signals", "Revenue scenario"],
-                    [[p["id"], sk[p["id"]]["name"], f"{sk[p['id']]['status']} / {stock_label(sk[p['id']]['stock'])}", p["tier"],
-                      "; ".join(f"{x['label']} ({x['detail']})" for x in p["signals"]), f"€{p['prize_low']/1000:,.0f}k–€{p['prize_high']/1000:,.0f}k"]
+    out += md_table(["Product", "Direction", "ID", "Price", "Target", "Index", "Revenue change", "Gross-profit uplift", "Note"],
+                    [[p["name"], p["direction"], p["id"], f"€{p['price']:.2f}", f"€{p['target_price']:.2f}", f"{p['price_idx']:.2f}",
+                      f"€{p['revenue_change_low']:,.0f} / €{p['revenue_change_high']:,.0f}", f"€{p['prize_low']:,.0f}–€{p['prize_high']:,.0f}", p["uplift_note"]]
                      for p in L["price_review"]])
     out += ["## Q4 · Availability", ""]
-    out += md_table(["ID", "Product", "Status / stock", "Reason", "Prize"], sku_rows(L["restock"], prize_cell))
+    out += md_table(["Product", "ID", "Status / stock", "Reason", "Estimate"],
+                    [[x["name"], x["id"], st(x["id"]), x["reason"], rng(x)] for x in L["restock"]])
     out += md_table(["Supplier", "Active SKUs", "Out of stock", "Low stock", "Revenue exposed"],
                     [[s["name"], s["n_active"], s["n_oos"], s["n_low"], eur(s["rev_exposed"])] for s in D["suppliers"][:6]])
     out += ["## Thresholds", ""]
     out += md_table(["Key", "Value", "Meaning"], [[t["key"], t["value"], t["label"]] for t in D["thresholds"]])
     out += ["## Rules", ""] + [f"- **{r['page']}: {r['name']}.** {r['text']}" for r in M["rules"]]
-    out += ["", "## Size-of-prize bases", ""] + [f"- {'Q' + str(p['q']) if p['q'] else 'General'}: {p['text']}" for p in M["prize_bases"]]
+    out += ["", "## Estimate bases", ""] + [f"- {'Q' + str(p['q']) if p['q'] else 'General'}: {p['text']}" for p in M["prize_bases"]]
     out += ["", "## Data questions to confirm with the customer", ""] + [f"- {q}" for q in M["data_questions"]]
     out += ["", "## Caveats", ""] + [f"- {c}" for c in M["caveats"]] + [""]
     (OUT / "recommendations.md").write_text("\n".join(out), encoding="utf-8")
@@ -691,42 +859,51 @@ def write_actions_csv(D):
     sk = {s["id"]: s for s in D["skus"]}
     ck = {c["key"]: c for c in D["cells"]}
     L = D["lists"]
-    cols = ["question", "list", "tier", "product_id", "cell", "product_name", "brand", "subcategory", "shade_group", "status",
-            "stock_status", "supplier", "price_eur", "channel_revenue_eur_12w", "channel_margin_pct",
+    cols = ["question", "list", "name", "tier", "priority", "direction", "product_id", "group", "brand", "subcategory", "shade_group",
+            "status", "stock_status", "supplier", "price_eur", "channel_revenue_eur_12w", "channel_margin_pct",
             "channel_sales_trend_12w_pct", "market_revenue_eur_12w", "market_sales_trend_12w_pct", "reason",
-            "prize_low_eur", "prize_high_eur", "target_market_unit_price_eur", "signed_revenue_change_at_target_eur", "margin_at_target_proxy", "peer_cells", "peer_sku_ids"]
+            "prize_low_eur", "prize_high_eur", "prize_unit", "products_suggested", "shelf_cm_needed", "shelf_basis",
+            "peers_active", "coverage_note", "target_price_eur", "price_index", "revenue_change_low_eur", "revenue_change_high_eur",
+            "peer_groups", "peer_sku_ids"]
     rows = []
 
-    def add(q, lst, item, sku_id=None, key=None, tier=""):
+    def add(q, lst, item, sku_id=None, key=None, unit="revenue"):
         if sku_id:
             s = sk[sku_id]
-            vals = [sku_id, s["cell"], s["name"], s["brand"], s["sub"], s["shade"], s["status"], s["stock"], s["supplier"],
+            vals = [sku_id, group_label(s["cell"]), s["brand"], s["sub"], s["shade"], s["status"], s["stock"], s["supplier"],
                     s["price"], s["rev"], s["margin"], s["ch_trend"], s["mkt_rev"], s["mk_trend"]]
+            name = s["name"]
         else:
             c = ck[key]
-            vals = ["", key, "", "", c["sub"], c["shade"], "", "", "", "", c["rev"], "", c["ch_trend"], c["mkt_rev"], c["mk_trend"]]
+            vals = ["", c["label"], "", c["sub"], c["shade"], "", "", "", "", c["rev"], "", c["ch_trend"], c["mkt_rev"], c["mk_trend"]]
+            name = c["label"]
         reason = item.get("reason") or "; ".join(f"{x['label']} ({x['detail']})" for x in item.get("signals", []))
-        rows.append([q, lst, tier] + [("" if v is None else v) for v in vals] +
-                    [reason, round(item.get("prize_low", 0), 2) if "prize_high" in item else "",
-                     round(item["prize_high"], 2) if "prize_high" in item else "",
-                     item.get("target_price", ""), item.get("revenue_change_at_target", ""), item.get("margin_at_target", ""),
-                     "; ".join(item.get("peer_keys", [])), "; ".join(item.get("peer_sku_ids", []))])
+        if item.get("uplift_note"):
+            reason += "; " + item["uplift_note"]
+        has = "prize_high" in item
+        rows.append([q, lst, name, item.get("tier", ""), item.get("priority", ""), item.get("direction", "")] +
+                    [("" if v is None else v) for v in vals] +
+                    [reason, round(item.get("prize_low", 0), 2) if has else "", round(item["prize_high"], 2) if has else "",
+                     unit if has else "", item.get("n_skus_suggested", ""), item.get("shelf_cm_needed", ""), item.get("shelf_basis", ""),
+                     item.get("peers_active", ""), item.get("coverage_note", ""), item.get("target_price", ""), item.get("price_idx", ""),
+                     item.get("revenue_change_low", ""), item.get("revenue_change_high", ""),
+                     "; ".join(item.get("peer_labels", [])), "; ".join(item.get("peer_sku_ids", []))])
 
     for g in L["gaps"]:
         if g["type"] == "cell":
-            add(1, "gap_cell", g, key=g["key"])
+            add(1, f"{g['priority']}_group", g, key=g["key"])
         else:
             add(1, "relist", g, sku_id=g["sku_id"])
     for u in L["under_cells"]:
-        add(1, "under_performing_cell", u, key=u["key"])
+        add(1, "under_performing_group", u, key=u["key"])
     for x in L["not_pushed"]:
         add(2, "not_pushed", x, sku_id=x["id"])
     for x in L["low_perf"]:
         add(2, "low_perf", x, sku_id=x["id"])
     for x in L["price_review"]:
-        add(3, "price_review", x, sku_id=x["id"], tier=x["tier"])
+        add(3, "price_review", x, sku_id=x["id"], unit="gross profit")
     for x in L["restock"]:
-        add(4, "restock", x, sku_id=x["id"])
+        add(4, "restock", x, sku_id=x["id"], unit="revenue protected")
     with open(OUT / "actions.csv", "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow(cols)
@@ -752,7 +929,7 @@ def main():
     n_rows = write_actions_csv(D)
 
     L = D["lists"]
-    print(f"{len(D['skus'])} SKUs, {len(D['comps'])} competitor signals, {len(D['cells'])} cells")
+    print(f"{len(D['skus'])} SKUs, {len(D['comps'])} competitor signals, {len(D['cells'])} subcategory × shade groups")
     print("List counts: " + ", ".join(f"{k}={len(v)}" for k, v in L.items()))
     for r in D["recs"]:
         print(f"Q{r['q']} {r['action']}\n    {r['evidence']}\n    {prize_text(r)}")

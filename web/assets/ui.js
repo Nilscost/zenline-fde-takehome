@@ -248,6 +248,27 @@
     return key == null ? "" : String(key).split("|").join(" · ");
   }
 
+  /* Shorten a display name for chart labels; the full name belongs in the tooltip. */
+  function shortName(s, n) {
+    s = String(s == null ? "" : s);
+    n = n || 24;
+    return s.length > n ? s.slice(0, n - 1).replace(/\s+$/, "") + "…" : s;
+  }
+  /* Client-facing wording for text that comes from the data layer. */
+  function plain(t) {
+    if (t == null) return t;
+    return String(t)
+      .replace(/\billustrative(ly)?\b,?\s*/gi, function (m) { return /^I/.test(m) ? "Estimated " : "estimated "; })
+      .replace(/\bcells\b/g, "groups").replace(/\bcell\b/g, "group")
+      .replace(/\bCells\b/g, "Groups").replace(/\bCell\b/g, "Group")
+      .replace(/estimated\s+estimated/gi, "estimated");
+  }
+  /* Product name for an ID (falls back to the ID only if the name is unknown). */
+  function skuName(id) {
+    var f = lookup("sku", "skus", "id"), s = f ? f(id) : null;
+    return (s && s.name) || (id == null ? "" : String(id));
+  }
+
   function kpis(container, list) {
     var wrap = el("div", { class: "kpis" });
     (list || []).forEach(function (k) {
@@ -266,10 +287,12 @@
     var left = el("div", { class: "rc-main" });
     left.appendChild(el("div", { html: badge("Q" + rec.q, "q") + (opts.showQuestion === false ? "" : ' <span class="rc-q">' + esc(rec.question) + "</span>") }));
     left.appendChild(el("h3", { text: rec.action }));
-    left.appendChild(el("p", { class: "rc-ev", text: rec.evidence }));
     var right = el("div", { class: "rc-prize" },
       el("b", { text: fmt.prize(rec.prize_low) + " – " + fmt.prize(rec.prize_high) }),
-      el("span", { text: rec.prize_unit + " / 12 wks" }));
+      el("span", { text: "Estimated size of prize · " + rec.prize_unit + " / 12 wks" }),
+      el("span", { text: (function () { var t = window.DATA && window.DATA.meta && window.DATA.meta.total_rev; if (!t) return "";
+        function f(v) { var p = v / t * 100; return (p >= 10 ? p.toFixed(0) : p.toFixed(1)) + "%"; }
+        return f(rec.prize_low) + "–" + f(rec.prize_high) + " of total sales"; })() }));
     c.appendChild(left);
     c.appendChild(right);
     return c;
@@ -315,6 +338,6 @@
     badge: badge, stockBadge: stockBadge, statusBadge: statusBadge,
     sku: mk("sku", "skus", "id"), comp: mk("comp", "comps", "id"), cell: mk("cell", "cells", "key"),
     brand: mk("brand", "brands", "key"), supplier: mk("supplier", "suppliers", "name"),
-    cellLabel: cellLabel, kpis: kpis, recCard: recCard
+    cellLabel: cellLabel, kpis: kpis, recCard: recCard, shortName: shortName, skuName: skuName, plain: plain
   };
 })();

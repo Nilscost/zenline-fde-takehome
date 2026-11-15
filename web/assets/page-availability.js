@@ -24,9 +24,10 @@
     var c = E("section", { class: "card pg-callout" });
     c.appendChild(E("div", null,
       E("div", { html: U.badge("Q" + rec.q, "q") + ' <span class="note">Recommended action</span>' }),
-      E("h3", { text: rec.action }), E("p", { text: rec.evidence }), E("p", { class: "note", text: rec.basis })));
-    c.appendChild(E("div", { class: "pg-prize" }, E("b", { text: F.prize(rec.prize_low) + " – " + F.prize(rec.prize_high) }),
-      E("span", { text: "per " + D.meta.period_weeks + " weeks · " + rec.prize_unit + ", illustrative" })));
+      E("h3", { text: U.plain(rec.action) }), E("p", { class: "note", text: U.plain(rec.basis) })));
+    c.appendChild(E("div", { class: "pg-prize" }, E("span", { text: "Estimated size of prize" }),
+      E("b", { text: F.prize(rec.prize_low) + " – " + F.prize(rec.prize_high) }),
+      E("span", { text: "per " + D.meta.period_weeks + " weeks · " + rec.prize_unit })));
     return c;
   }
   var rec = D.recs.filter(function (r) { return r.q === 4; })[0];
@@ -168,11 +169,11 @@
       var ina = !s.active;
       return {
         id: s.id, x: s.rev, y: s.mk_trend, size: s.mkt_rev, color: ina ? COL.inactive : COL[s.stock], hollow: ina, dashed: ina,
-        label: labelIds[s.id] ? s.id : null,
-        tip: { title: s.id + " · " + s.name, rows: [
+        label: labelIds[s.id] ? U.shortName(s.name, 22) : null,
+        tip: { title: s.name, rows: [
           ["Supplier", s.supplier], ["Status", ina ? "Inactive" : "Active"], ["Stock", STOCK_TXT[s.stock] || s.stock],
           ["Channel revenue", F.eur(s.rev)], ["Market trend", F.pct(s.mk_trend)], ["Market revenue", F.eur(s.mkt_rev)],
-          ["On restock list", restockMap[s.id] ? "Yes" : "No"]] }
+          ["On restock list", restockMap[s.id] ? "Yes" : "No"], ["Product ID", s.id]] }
       };
     });
   }
@@ -180,7 +181,7 @@
   var xAx = { label: "Channel revenue, " + D.meta.period_weeks + " weeks (log)", scale: "log", split: Q.x_split, format: function (v) { return F.eurK(v); } };
   var yAx = { label: "Market trend, " + D.meta.period_weeks + " weeks", scale: "linear", split: Q.y_split, format: function (v) { return F.pct(v); } };
   function rootView() {
-    return { id: "skus", title: "All SKUs", x: xAx, y: yAx, legend: legend2, sizeNote: "Bubble size = market revenue · shaded corner = act here first · labels = out-of-stock SKUs on the restock list", points: skuPoints(D.skus.map(function (s) { return s.id; })) };
+    return { id: "skus", title: "All SKUs", x: xAx, y: yAx, legend: legend2, sizeNote: "Bubble size = market revenue · shaded corner = act here first · labels = out-of-stock products on the restock list", points: skuPoints(D.skus.map(function (s) { return s.id; })) };
   }
   function zoomView() {
     var sp = supByName[state.supplier];
@@ -214,20 +215,21 @@
   });
   app.appendChild(tblCard);
 
-  var rsCard = U.card("Restock list", "Active SKUs that are out of stock, or low on stock in a market growing fast. Prize = revenue recovered, illustrative. Click a row to find the SKU in the chart.");
-  var rsRows = D.lists.restock.map(function (r) { var s = skuById[r.id] || {}; return Object.assign({ name: s.name, supplier: s.supplier, stock: s.stock, rev: s.rev, mk_trend: s.mk_trend }, r); });
+  var rsCard = U.card("Restock list", "Active products that are out of stock, or low on stock in a fast-growing market. Prize = estimated revenue recovered. Click a row to find the product in the chart.");
+  var rsRows = D.lists.restock.map(function (r) { var s = skuById[r.id] || {}; return Object.assign({ name: s.name || r.id, supplier: s.supplier, stock: s.stock, rev: s.rev, mk_trend: s.mk_trend }, r); });
   var rsTbl = U.table(rsCard, {
     columns: [{ key: "stock", label: "Stock", html: true, fmt: function (v) { return U.stockBadge(v); } },
-      { key: "id", label: "ID" }, { key: "name", label: "Product" }, { key: "supplier", label: "Supplier" },
+      { key: "name", label: "Product" }, { key: "supplier", label: "Supplier" },
       { key: "rev", label: "Revenue", num: true, fmt: function (v) { return F.eur(v); } },
       { key: "mk_trend", label: "Market trend", num: true, fmt: function (v) { return F.pct(v); } },
-      { key: "reason", label: "Why" },
-      { key: "prize_high", label: "Prize range (revenue)", num: true, fmt: function (v, r) { return F.prize(r.prize_low) + " – " + F.prize(r.prize_high); } }],
+      { key: "reason", label: "Why", fmt: function (v) { return U.plain(v); } },
+      { key: "prize_high", label: "Estimated prize (revenue)", num: true, fmt: function (v, r) { return F.prize(r.prize_low) + " – " + F.prize(r.prize_high); } }],
     rows: rsRows, sort: { key: "prize_high", dir: "desc" }, maxHeight: 460, empty: "No restock SKUs for this selection",
     onRowClick: function (r) { selectSupplier(r.supplier, r.id); }
   });
-  app.insertBefore(rsCard, supCard);
+  // Order: restock-priority chart, restock list, then supplier chart and scorecard.
   app.insertBefore(chartCard, supCard);
+  app.insertBefore(rsCard, supCard);
 
   /* ---- selection logic ---- */
   function applySel() {
@@ -251,7 +253,7 @@
     if (sp) {
       selInfo.appendChild(document.createTextNode("Selected: "));
       selInfo.appendChild(E("b", { text: sp.name }));
-      selInfo.appendChild(document.createTextNode(" · " + sp.n + " SKUs · " + F.eur(sp.rev_exposed) + " revenue exposed" + (state.sel ? " · " + state.sel : "")));
+      selInfo.appendChild(document.createTextNode(" · " + sp.n + " SKUs · " + F.eur(sp.rev_exposed) + " revenue exposed" + (state.sel ? " · " + U.shortName(U.skuName(state.sel), 40) : "")));
     } else selInfo.textContent = "No supplier selected";
   }
   function selectSupplier(name, skuId) {

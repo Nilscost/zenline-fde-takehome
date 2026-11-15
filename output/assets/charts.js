@@ -193,7 +193,15 @@
       e.legend.forEach(function (l) {
         var item = H("span", "qc-leg");
         var sw = H("i", "qc-sw");
-        if (l.hollow) { sw.style.background = "#fff"; sw.style.border = "2px solid " + l.color; }
+        if (l.ring) {
+          // ring legend entry: optional fill (l.color) inside a coloured outline
+          var rg = l.ring;
+          sw.style.background = l.color || "#fff";
+          sw.style.border = (rg.width || 2) + "px " + (rg.dash ? "dashed" : "solid") + " " + (rg.color || "#111");
+          sw.style.borderRadius = "50%";
+          sw.style.boxSizing = "border-box";
+        }
+        else if (l.hollow) { sw.style.background = "#fff"; sw.style.border = "2px solid " + l.color; }
         else { sw.style.background = l.color; sw.style.borderColor = darken(l.color); }
         item.appendChild(sw);
         item.appendChild(document.createTextNode(l.label));
@@ -367,6 +375,16 @@
         if (p.dashed) c.setAttribute("stroke-dasharray", "3 2");
         if (it.on) { c.setAttribute("stroke", C.selected || "#111"); c.setAttribute("stroke-width", 1.8); }
         if (it.dim) c.setAttribute("opacity", 0.18);
+        // optional per-point outer ring: p.ring = { color, width, dash, gap } (dash: true or an SVG dasharray)
+        if (p.ring) {
+          var rg = p.ring, rw = isNum(rg.width) ? rg.width : 2;
+          S("circle", {
+            cx: it.px, cy: it.py, r: it.r + (isNum(rg.gap) ? rg.gap : 2) + rw / 2, fill: "none",
+            stroke: rg.color || "#111", "stroke-width": rw,
+            "stroke-dasharray": rg.dash ? (rg.dash === true ? "3 2.5" : rg.dash) : null,
+            opacity: it.dim ? 0.18 : 1, "pointer-events": "none"
+          }, ptG);
+        }
         wire(c, it, it.r);
         if (sel != null && sel === p.id) ringItem = it;
       });
@@ -383,7 +401,7 @@
         });
       }
       if (ringItem) {
-        S("circle", { cx: ringItem.px, cy: ringItem.py, r: ringItem.r + 4, fill: "none", stroke: C.selected || "#111", "stroke-width": 2.5, "pointer-events": "none" }, plot);
+        S("circle", { cx: ringItem.px, cy: ringItem.py, r: ringItem.r + 4 + (ringItem.p.ring ? 4 : 0), fill: "none", stroke: C.selected || "#111", "stroke-width": 2.5, "pointer-events": "none" }, plot);
       }
 
       // labels
@@ -400,7 +418,7 @@
         var txt = it.p.label;
         if (txt == null || txt === "") return;
         txt = String(txt);
-        var w = txt.length * 6 + 2, h = 12, r = it.r + 3;
+        var w = txt.length * 6 + 2, h = 12, r = it.r + 3 + (it.p.ring ? 4 : 0);
         var cands = [
           { x: it.px + r, y: it.py - h / 2, a: "start", tx: it.px + r },
           { x: it.px - r - w, y: it.py - h / 2, a: "end", tx: it.px - r },
